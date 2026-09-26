@@ -3,6 +3,7 @@
 
 ## Ref
 * https://github.com/clevebitr/Krkr2Next
+* https://github.com/clevebitr/Krkr2Next/tree/8445a127b9b9401db9a645d6c8e9acd3ee264006  
 * ndk-build based on https://github.com/weimingtom/KrKr2-Next-no-vcpkg  
 
 ## How to build for android  
