@@ -5,6 +5,23 @@
 * https://github.com/clevebitr/Krkr2Next
 * ndk-build based on https://github.com/weimingtom/KrKr2-Next-no-vcpkg  
 
+## How to build for android  
+* cd android_adt/jni
+* Double click console.bat (modify the path %PATH% points to your Android NDK path in console.bat by yourself)
+```
+::@set PATH=D:\android-ndk-r9c;%PATH%
+::@set PATH=D:\android-ndk-r10e;%PATH%
+@set PATH=D:\home\soft\android_studio_sdk\ndk\25.2.9519653;%PATH%
+@set NDK_MODULE_PATH=%CD%\..\..\cpp
+@cmd
+```
+* ndk-build clean
+* ndk-build -j8 (or ndk-build NDK_DEBUG=1 -j8, see adb_logcat_and_debug_crash.txt)
+* Get libengine_api.so under android_adt/libs/arm64-v8a/libengine_api.so, copy to app/app/src/main/jniLibs/arm64-v8a/libengine_api.so  
+* Use Android ADT to load android_adt/.project
+* Put https://github.com/weimingtom/KrKr2-Next_fork3/tree/master/_testdata/data.xp3 to "/storage/emulated/0/Download/Spring Days/Data.xp3" in the ARM64 Android device
+* Compile the apk file and install it to the Android device, Now only support ARM64 Android device
+
 ## Original README.md
 
 ----------------------------------------
