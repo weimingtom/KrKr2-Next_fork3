@@ -8,7 +8,8 @@
 
 ## How to build for android  
 * cd android_adt/jni
-* Double click console.bat (modify the path %PATH% points to your Android NDK path in console.bat by yourself)
+* Double click console.bat (modify the path %PATH% points to your Android NDK path in console.bat by yourself)  
+see also https://github.com/weimingtom/KrKr2-Next_fork3/blob/master/android_adt/jni/console.bat  
 ```
 ::@set PATH=D:\android-ndk-r9c;%PATH%
 ::@set PATH=D:\android-ndk-r10e;%PATH%
