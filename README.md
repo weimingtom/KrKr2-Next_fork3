@@ -1,3 +1,14 @@
+# KrKr2-Next_fork3
+[WIP] My third fork of KrKr2-Next, based on clevebitr/Krkr2Next
+
+## Ref
+* https://github.com/clevebitr/Krkr2Next
+* ndk-build based on https://github.com/weimingtom/KrKr2-Next-no-vcpkg  
+
+## Original README.md
+
+----------------------------------------
+
 # KrKr2-Next-Compose
 
 面向 **Android** 的 KiriKiri2（吉里吉里2）运行环境：原生 Kotlin/Compose 宿主壳 +
