@@ -1,0 +1,251 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="org.dpdns.clevebitr"
+4    android:versionCode="1"
+5    android:versionName="v0.1.0-nogit-260926" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="24"
+9        android:targetSdkVersion="35" />
+10
+11    <!--
+12        引擎通过 engine_open_game(path) 消费**裸文件系统路径**，content:// URI
+13        无法直接解析为真实路径，因此不用 SAF，改用全文件访问权限。
+14        API 24-28 走 READ_EXTERNAL_STORAGE + requestLegacyExternalStorage；
+15        API 30+ 引导用户在系统设置里授予 MANAGE_EXTERNAL_STORAGE。
+16    -->
+17    <uses-permission
+17-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:11:5-13:38
+18        android:name="android.permission.READ_EXTERNAL_STORAGE"
+18-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:12:9-64
+19        android:maxSdkVersion="32" />
+19-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:13:9-35
+20    <uses-permission
+20-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:14:5-16:38
+21        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+21-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:15:9-65
+22        android:maxSdkVersion="29" />
+22-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:16:9-35
+23    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+23-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:17:5-19:40
+23-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:18:9-66
+24
+25    <!--
+26        刮削（VNDB）与封面下载需要联网。**没有它刮削功能只会报"无法连接"**，
+27        而这类失败在模拟器/断网时看起来像是代码 bug，所以权限就写在这里说清楚。
+28    -->
+29    <uses-permission android:name="android.permission.INTERNET" />
+29-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:25:5-67
+29-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:25:22-64
+30    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+30-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:26:5-79
+30-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:26:22-76
+31
+32    <!-- ANGLE 已移除，走平台自带的 GLES 驱动 -->
+33    <uses-feature
+33-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:29:5-31:35
+34        android:glEsVersion="0x00030000"
+34-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:30:9-41
+35        android:required="true" />
+35-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:31:9-32
+36
+37    <permission
+37-->[androidx.core:core:1.16.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\1e0d50c40c87d2ab545a50d9017b4a84\transformed\core-1.16.0\AndroidManifest.xml:22:5-24:47
+38        android:name="org.dpdns.clevebitr.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+38-->[androidx.core:core:1.16.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\1e0d50c40c87d2ab545a50d9017b4a84\transformed\core-1.16.0\AndroidManifest.xml:23:9-81
+39        android:protectionLevel="signature" />
+39-->[androidx.core:core:1.16.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\1e0d50c40c87d2ab545a50d9017b4a84\transformed\core-1.16.0\AndroidManifest.xml:24:9-44
+40
+41    <uses-permission android:name="org.dpdns.clevebitr.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+41-->[androidx.core:core:1.16.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\1e0d50c40c87d2ab545a50d9017b4a84\transformed\core-1.16.0\AndroidManifest.xml:26:5-97
+41-->[androidx.core:core:1.16.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\1e0d50c40c87d2ab545a50d9017b4a84\transformed\core-1.16.0\AndroidManifest.xml:26:22-94
+42
+43    <application
+43-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:33:5-89:19
+44        android:name="org.dpdns.clevebitr.KrKr2NextApplication"
+44-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:34:9-45
+45        android:allowBackup="false"
+45-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:35:9-36
+46        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+46-->[androidx.core:core:1.16.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\1e0d50c40c87d2ab545a50d9017b4a84\transformed\core-1.16.0\AndroidManifest.xml:28:18-86
+47        android:debuggable="true"
+48        android:extractNativeLibs="false"
+49        android:hardwareAccelerated="true"
+49-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:36:9-43
+50        android:icon="@mipmap/ic_launcher"
+50-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:37:9-43
+51        android:label="@string/app_name"
+51-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:38:9-41
+52        android:largeHeap="true"
+52-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:39:9-33
+53        android:requestLegacyExternalStorage="true"
+53-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:40:9-52
+54        android:supportsRtl="true"
+54-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:41:9-35
+55        android:testOnly="true"
+56        android:theme="@style/Theme.KrKr2Next" >
+56-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:42:9-47
+57        <activity
+57-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:45:9-56:20
+58            android:name="org.dpdns.clevebitr.MainActivity"
+58-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:46:13-41
+59            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density|smallestScreenSize"
+59-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:47:13-141
+60            android:exported="true"
+60-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:48:13-36
+61            android:launchMode="singleTask"
+61-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:49:13-44
+62            android:resizeableActivity="false"
+62-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:50:13-47
+63            android:screenOrientation="sensorLandscape" >
+63-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:51:13-56
+64            <intent-filter>
+64-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:52:13-55:29
+65                <action android:name="android.intent.action.MAIN" />
+65-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:53:17-69
+65-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:53:25-66
+66
+67                <category android:name="android.intent.category.LAUNCHER" />
+67-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:54:17-77
+67-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:54:27-74
+68            </intent-filter>
+69        </activity>
+70
+71        <!--
+72            崩溃界面必须跑在独立进程里：它是在主进程即将被 killProcess 掉的时刻被拉起来
+73            的，同进程的话它一出生就会被一起杀掉。代价是拿不到内存状态，因此它只读崩溃
+74            报告文件。taskAffinity="" + excludeFromRecents 让它不进最近任务、也不搅乱
+75            主进程的任务栈。
+76        -->
+77        <activity
+77-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:64:9-74:54
+78            android:name="org.dpdns.clevebitr.CrashActivity"
+78-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:65:13-42
+79            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density|smallestScreenSize"
+79-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:66:13-141
+80            android:excludeFromRecents="true"
+80-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:67:13-46
+81            android:exported="false"
+81-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:68:13-37
+82            android:launchMode="singleInstance"
+82-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:69:13-48
+83            android:process=":crash"
+83-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:70:13-37
+84            android:resizeableActivity="false"
+84-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:71:13-47
+85            android:screenOrientation="sensorLandscape"
+85-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:72:13-56
+86            android:taskAffinity=""
+86-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:73:13-36
+87            android:theme="@style/Theme.KrKr2Next" />
+87-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:74:13-51
+88
+89        <!--
+90            供「分享日志」把 logs/ 下的文件以 content:// 交给别的应用。
+91            只读授权、exported=false，白名单见 res/xml/file_paths.xml。
+92        -->
+93        <provider
+94            android:name="androidx.core.content.FileProvider"
+94-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:81:13-62
+95            android:authorities="org.dpdns.clevebitr.fileprovider"
+95-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:82:13-64
+96            android:exported="false"
+96-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:83:13-37
+97            android:grantUriPermissions="true" >
+97-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:84:13-47
+98            <meta-data
+98-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:85:13-87:54
+99                android:name="android.support.FILE_PROVIDER_PATHS"
+99-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:86:17-67
+100                android:resource="@xml/file_paths" />
+100-->D:\work_krkr23\KrKr2-Next_fork3\app\app\src\main\AndroidManifest.xml:87:17-51
+101        </provider>
+102
+103        <activity
+103-->[androidx.compose.ui:ui-tooling-android:1.11.4] C:\Users\admin\.gradle\caches\8.14.5\transforms\ebb8794bc34ccb02b9073197d18aad28\transformed\ui-tooling\AndroidManifest.xml:23:9-25:39
+104            android:name="androidx.compose.ui.tooling.PreviewActivity"
+104-->[androidx.compose.ui:ui-tooling-android:1.11.4] C:\Users\admin\.gradle\caches\8.14.5\transforms\ebb8794bc34ccb02b9073197d18aad28\transformed\ui-tooling\AndroidManifest.xml:24:13-71
+105            android:exported="true" />
+105-->[androidx.compose.ui:ui-tooling-android:1.11.4] C:\Users\admin\.gradle\caches\8.14.5\transforms\ebb8794bc34ccb02b9073197d18aad28\transformed\ui-tooling\AndroidManifest.xml:25:13-36
+106
+107        <uses-library
+107-->[androidx.window:window:1.5.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\cd95629aebcbd023b28f79c2b01531b5\transformed\window-1.5.0\AndroidManifest.xml:23:9-25:40
+108            android:name="androidx.window.extensions"
+108-->[androidx.window:window:1.5.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\cd95629aebcbd023b28f79c2b01531b5\transformed\window-1.5.0\AndroidManifest.xml:24:13-54
+109            android:required="false" />
+109-->[androidx.window:window:1.5.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\cd95629aebcbd023b28f79c2b01531b5\transformed\window-1.5.0\AndroidManifest.xml:25:13-37
+110        <uses-library
+110-->[androidx.window:window:1.5.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\cd95629aebcbd023b28f79c2b01531b5\transformed\window-1.5.0\AndroidManifest.xml:26:9-28:40
+111            android:name="androidx.window.sidecar"
+111-->[androidx.window:window:1.5.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\cd95629aebcbd023b28f79c2b01531b5\transformed\window-1.5.0\AndroidManifest.xml:27:13-51
+112            android:required="false" />
+112-->[androidx.window:window:1.5.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\cd95629aebcbd023b28f79c2b01531b5\transformed\window-1.5.0\AndroidManifest.xml:28:13-37
+113
+114        <provider
+114-->[androidx.emoji2:emoji2:1.4.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\01454f6cda3b6c96f762b4df6bf7be28\transformed\emoji2-1.4.0\AndroidManifest.xml:24:9-32:20
+115            android:name="androidx.startup.InitializationProvider"
+115-->[androidx.emoji2:emoji2:1.4.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\01454f6cda3b6c96f762b4df6bf7be28\transformed\emoji2-1.4.0\AndroidManifest.xml:25:13-67
+116            android:authorities="org.dpdns.clevebitr.androidx-startup"
+116-->[androidx.emoji2:emoji2:1.4.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\01454f6cda3b6c96f762b4df6bf7be28\transformed\emoji2-1.4.0\AndroidManifest.xml:26:13-68
+117            android:exported="false" >
+117-->[androidx.emoji2:emoji2:1.4.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\01454f6cda3b6c96f762b4df6bf7be28\transformed\emoji2-1.4.0\AndroidManifest.xml:27:13-37
+118            <meta-data
+118-->[androidx.emoji2:emoji2:1.4.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\01454f6cda3b6c96f762b4df6bf7be28\transformed\emoji2-1.4.0\AndroidManifest.xml:29:13-31:52
+119                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+119-->[androidx.emoji2:emoji2:1.4.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\01454f6cda3b6c96f762b4df6bf7be28\transformed\emoji2-1.4.0\AndroidManifest.xml:30:17-75
+120                android:value="androidx.startup" />
+120-->[androidx.emoji2:emoji2:1.4.0] C:\Users\admin\.gradle\caches\8.14.5\transforms\01454f6cda3b6c96f762b4df6bf7be28\transformed\emoji2-1.4.0\AndroidManifest.xml:31:17-49
+121            <meta-data
+121-->[androidx.lifecycle:lifecycle-process:2.9.4] C:\Users\admin\.gradle\caches\8.14.5\transforms\84e7686eddb7cba8aa40fa287fb1e2ba\transformed\lifecycle-process-2.9.4\AndroidManifest.xml:29:13-31:52
+122                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+122-->[androidx.lifecycle:lifecycle-process:2.9.4] C:\Users\admin\.gradle\caches\8.14.5\transforms\84e7686eddb7cba8aa40fa287fb1e2ba\transformed\lifecycle-process-2.9.4\AndroidManifest.xml:30:17-78
+123                android:value="androidx.startup" />
+123-->[androidx.lifecycle:lifecycle-process:2.9.4] C:\Users\admin\.gradle\caches\8.14.5\transforms\84e7686eddb7cba8aa40fa287fb1e2ba\transformed\lifecycle-process-2.9.4\AndroidManifest.xml:31:17-49
+124            <meta-data
+124-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:29:13-31:52
+125                android:name="androidx.profileinstaller.ProfileInstallerInitializer"
+125-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:30:17-85
+126                android:value="androidx.startup" />
+126-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:31:17-49
+127        </provider>
+128
+129        <receiver
+129-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:34:9-52:20
+130            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+130-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:35:13-76
+131            android:directBootAware="false"
+131-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:36:13-44
+132            android:enabled="true"
+132-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:37:13-35
+133            android:exported="true"
+133-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:38:13-36
+134            android:permission="android.permission.DUMP" >
+134-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:39:13-57
+135            <intent-filter>
+135-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:40:13-42:29
+136                <action android:name="androidx.profileinstaller.action.INSTALL_PROFILE" />
+136-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:41:17-91
+136-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:41:25-88
+137            </intent-filter>
+138            <intent-filter>
+138-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:43:13-45:29
+139                <action android:name="androidx.profileinstaller.action.SKIP_FILE" />
+139-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:44:17-85
+139-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:44:25-82
+140            </intent-filter>
+141            <intent-filter>
+141-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:46:13-48:29
+142                <action android:name="androidx.profileinstaller.action.SAVE_PROFILE" />
+142-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:47:17-88
+142-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:47:25-85
+143            </intent-filter>
+144            <intent-filter>
+144-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:49:13-51:29
+145                <action android:name="androidx.profileinstaller.action.BENCHMARK_OPERATION" />
+145-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:50:17-95
+145-->[androidx.profileinstaller:profileinstaller:1.4.1] C:\Users\admin\.gradle\caches\8.14.5\transforms\4d2256b7a2255d0987000b823004770a\transformed\profileinstaller-1.4.1\AndroidManifest.xml:50:25-92
+146            </intent-filter>
+147        </receiver>
+148    </application>
+149
+150</manifest>

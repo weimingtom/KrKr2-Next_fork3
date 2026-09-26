@@ -1,0 +1,1353 @@
+/**
+ * @file ui_stubs.cpp
+ * @brief Stub implementations for UI layer functions and platform
+ *        functions that were previously provided by MainScene.cpp,
+ *        AppDelegate.cpp, and the environ/ui/ directory.
+ *
+ * With the UI owned by the Android host shell, all of these are replaced by
+ * minimal stubs that either log a warning or return a sensible default.
+ *
+ * Functions stubbed here are called from the engine core and must link,
+ * but their functionality will be provided by the host shell.
+ */
+
+#include <spdlog/spdlog.h>
+#include <string>
+#include <vector>
+#include <filesystem>
+#include <fstream>
+#include <cstring>
+#include <mutex>
+#include <chrono>
+#include <thread>
+
+#include "tjsCommHead.h"
+#include "tjsConfig.h"
+#include "WindowIntf.h"
+#include "WindowImpl.h"
+#include "MenuItemIntf.h"
+#include "Platform.h"
+#include "TVPWindow.h"
+#include "Application.h"
+#include "RenderManager.h"
+#include "krkr_egl_context.h"
+#include "SysInitImpl.h"
+#include "VideoOvlImpl.h"
+// TVPPostWindowUpdate（BringToFront / ShowWindowAsModal 用它请求重绘）
+#include "EventIntf.h"
+// 关窗确认闸门与模态输入泵（krkr::host）在 SysInitImpl.h 里声明；
+// 卡死探针的阶段标记在下面这个头里 —— 模态循环每帧要刷心跳，否则会被看门狗
+// 当成"渲染线程 1.5s 没推进"误报。
+#include "../../utils/StallWatchdog.h"
+
+#include <GLES3/gl3.h>
+
+// TVPDrawSceneOnce 定义在 environ/EngineLoop.cpp、声明在 environ/MainScene.h；
+// 这里只留一个声明（模态循环每帧调它做呈现 + 节拍）。
+int TVPDrawSceneOnce(int interval);
+
+// 全局图层对象计数（诊断用，区分「引擎没建图层/没东西画」与「画了但没进源纹理」）
+extern tjs_int TVPGetLayerCount();
+
+// ---------------------------------------------------------------------------
+// Live2D post-draw hook — called after scene blit in UpdateDrawBuffer
+// ---------------------------------------------------------------------------
+static void (*g_postDrawHook)() = nullptr;
+void TVPSetPostDrawHook(void (*hook)()) { g_postDrawHook = hook; }
+
+// ---------------------------------------------------------------------------
+// 黑屏探针状态：连续若干次采样显示「引擎在画 + blit 源纹理全黑」时，判定为
+// 黑屏持久化，并输出诊断（含视频 overlay 是否在播，用于验证 krmovie Present
+// 是否被 stub 阻塞)。
+// ---------------------------------------------------------------------------
+static int s_blackSampleCount = 0; // 连续「黑且有绘制」的采样次数
+static bool s_blackReported = false; // 本段黑屏是否已上报
+static const int kBlackReportThreshold = 3;
+
+// ---------------------------------------------------------------------------
+// 视频 overlay 帧（krmovie 的 overlay 模式电影）—— 引擎侧
+// （KRMoviePlayer.cpp 的 VideoPresentOverlay::PresentPicture）把解码出的 RGBA
+// 帧拷进这里，宿主层在场景 blit 之后把它作为一张纹理叠画到宿主 render target。
+// overlay 模式的语义就是视频盖在画面上（KiriKiri 在 Win32 上用的是独立 overlay
+// 子窗口，这里等价地画在最终合成之上）。
+// 帧数据自上而下（row 0 = 图像顶行），dest 为游戏坐标矩形（含 Zoom 偏移）。
+// ---------------------------------------------------------------------------
+static std::mutex s_videoOverlayMtx;
+static std::vector<uint8_t> s_videoOverlayRgba;
+static int s_videoOverlayWidth = 0;
+static int s_videoOverlayHeight = 0;
+static tTVPRect s_videoOverlayDest;
+static uint64_t s_videoOverlaySerial = 0; // 0 = 无帧（不画）
+
+static bool VideoOverlayFrameActive() {
+    std::lock_guard<std::mutex> lk(s_videoOverlayMtx);
+    return s_videoOverlaySerial != 0;
+}
+
+// 供 engine_tick 查询（与 TVPHostSubmitVideoOverlayFrame 同一约定：本地 extern 声明，
+// 不新增头文件）。用途见 engine_tick 里的"overlay 电影必须每帧刷新主窗口"。
+bool TVPHostVideoOverlayFrameActive() { return VideoOverlayFrameActive(); }
+
+// 由 KRMoviePlayer.cpp 调用（本地 extern 声明，不新增头文件）。
+bool TVPHostSubmitVideoOverlayFrame(const void *rgba, int width, int height,
+                                    int stride_bytes, int left, int top,
+                                    int right, int bottom) {
+    if(!rgba || width <= 0 || height <= 0 || stride_bytes < width * 4)
+        return false;
+    const size_t rowBytes = static_cast<size_t>(width) * 4;
+    std::lock_guard<std::mutex> lk(s_videoOverlayMtx);
+    s_videoOverlayRgba.resize(rowBytes * static_cast<size_t>(height));
+    const uint8_t *src = static_cast<const uint8_t *>(rgba);
+    for(int y = 0; y < height; ++y) {
+        std::memcpy(s_videoOverlayRgba.data() +
+                        static_cast<size_t>(y) * rowBytes,
+                    src + static_cast<size_t>(y) * stride_bytes, rowBytes);
+    }
+    s_videoOverlayWidth = width;
+    s_videoOverlayHeight = height;
+    s_videoOverlayDest = tTVPRect(left, top, right, bottom);
+    ++s_videoOverlaySerial;
+    return true;
+}
+
+void TVPHostClearVideoOverlayFrame() {
+    std::lock_guard<std::mutex> lk(s_videoOverlayMtx);
+    s_videoOverlaySerial = 0;
+    s_videoOverlayWidth = s_videoOverlayHeight = 0;
+    std::vector<uint8_t>().swap(s_videoOverlayRgba);
+}
+
+// ---------------------------------------------------------------------------
+// 视频 overlay 用的小程序：单位四边形 + 一个 NDC 目标矩形，UV 从顶点位置直推
+// （约定：图像顶行 = 纹理 v0，画面上方 = NDC +1，与 scene blit / Live2D
+// post-draw 相同）。
+// ---------------------------------------------------------------------------
+static GLuint kBuildVideoOverlayProgram() {
+    const char *vs_src = R"(#version 300 es
+        layout(location = 0) in vec2 aPos;
+        uniform vec4 uRect; // xmin, ymin, xmax, ymax (NDC)
+        out vec2 vUV;
+        void main() {
+            vec2 t = aPos * 0.5 + 0.5;
+            gl_Position = vec4(mix(uRect.xy, uRect.zw, t), 0.0, 1.0);
+            vUV = vec2(t.x, 1.0 - t.y);
+        }
+    )";
+    const char *fs_src = R"(#version 300 es
+        precision mediump float;
+        in vec2 vUV;
+        out vec4 fragColor;
+        uniform sampler2D uTex;
+        void main() {
+            fragColor = texture(uTex, vUV);
+        }
+    )";
+    auto compileShader = [](GLenum type, const char *src) -> GLuint {
+        GLuint s = glCreateShader(type);
+        glShaderSource(s, 1, &src, nullptr);
+        glCompileShader(s);
+        GLint ok = 0;
+        glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if(!ok) {
+            char log[512];
+            glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+            spdlog::error("Video overlay shader compile error: {}", log);
+        }
+        return s;
+    };
+    GLuint vs = compileShader(GL_VERTEX_SHADER, vs_src);
+    GLuint fs = compileShader(GL_FRAGMENT_SHADER, fs_src);
+    GLuint prog = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    glLinkProgram(prog);
+    GLint ok = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if(!ok) {
+        char log[512];
+        glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+        spdlog::error("Video overlay program link error: {}", log);
+        glDeleteProgram(prog);
+        prog = 0;
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    return prog;
+}
+
+// ---------------------------------------------------------------------------
+// HostWindowLayer — concrete iWindowLayer for the Android host shell.
+// Provides a logical window backed by the native EGL surface (ANativeWindow
+// when a SurfaceTexture is attached, Pbuffer otherwise).
+// ---------------------------------------------------------------------------
+class HostWindowLayer : public iWindowLayer {
+public:
+    explicit HostWindowLayer(tTJSNI_Window *owner) :
+        owner_(owner), visible_(true), caption_("krkr2"), width_(0), height_(0),
+        active_(true), closing_(false) {
+        // Get initial size from EGL context
+        auto &egl = krkr::GetEngineEGLContext();
+        if(egl.IsValid()) {
+            width_ = static_cast<tjs_int>(egl.GetWidth());
+            height_ = static_cast<tjs_int>(egl.GetHeight());
+        } else {
+            width_ = 1280;
+            height_ = 720;
+        }
+        spdlog::info("HostWindowLayer created: {}x{}", width_, height_);
+    }
+
+    ~HostWindowLayer() {
+        if(blit_program_) {
+            glDeleteProgram(blit_program_);
+            blit_program_ = 0;
+        }
+        if(blit_vbo_) {
+            glDeleteBuffers(1, &blit_vbo_);
+            blit_vbo_ = 0;
+        }
+        if(blit_texture_) {
+            glDeleteTextures(1, &blit_texture_);
+            blit_texture_ = 0;
+        }
+        if(video_overlay_program_) {
+            glDeleteProgram(video_overlay_program_);
+            video_overlay_program_ = 0;
+        }
+        if(video_overlay_texture_) {
+            glDeleteTextures(1, &video_overlay_texture_);
+            video_overlay_texture_ = 0;
+        }
+        spdlog::debug("HostWindowLayer destroyed");
+    }
+
+    // -- Pure virtual implementations --
+
+    void SetPaintBoxSize(tjs_int w, tjs_int h) override {
+        // Only set WindowSize here — DestRect is exclusively managed by
+        // UpdateDrawBuffer() which knows the correct letterbox viewport.
+        // Setting DestRect here would overwrite the viewport offset and
+        // cause mouse Y-axis misalignment.
+        if(!owner_)
+            return;
+        auto *dd = owner_->GetDrawDevice();
+        if(!dd)
+            return;
+
+        width_ = w;
+        height_ = h;
+
+        auto &egl = krkr::GetEngineEGLContext();
+        tjs_int surf_w =
+            egl.IsValid() ? static_cast<tjs_int>(egl.GetWidth()) : w;
+        tjs_int surf_h =
+            egl.IsValid() ? static_cast<tjs_int>(egl.GetHeight()) : h;
+        if(surf_w <= 0)
+            surf_w = w;
+        if(surf_h <= 0)
+            surf_h = h;
+
+        dd->SetWindowSize(surf_w, surf_h);
+        spdlog::debug(
+            "HostWindowLayer::SetPaintBoxSize: layer={}x{}, surface={}x{}", w,
+            h, surf_w, surf_h);
+    }
+
+    bool GetFormEnabled() override { return !closing_; }
+
+    void SetDefaultMouseCursor() override {}
+
+    void GetCursorPos(tjs_int &x, tjs_int &y) override {
+        x = last_mouse_x_;
+        y = last_mouse_y_;
+    }
+
+    void SetCursorPos(tjs_int x, tjs_int y) override {
+        last_mouse_x_ = x;
+        last_mouse_y_ = y;
+    }
+
+    void UpdateCursorPos(tjs_int x, tjs_int y) override {
+        last_mouse_x_ = x;
+        last_mouse_y_ = y;
+    }
+
+    void SetHintText(const ttstr &text) override {}
+
+    void SetAttentionPoint(tjs_int left, tjs_int top,
+                           const struct tTVPFont *font) override {}
+
+    void ZoomRectangle(tjs_int &left, tjs_int &top, tjs_int &right,
+                       tjs_int &bottom) override {
+        // No zoom transformation — coordinates pass through 1:1
+    }
+
+    void BringToFront() override {
+        // 宿主只有一个 surface，没有真正的 z 序；能做的"排到最前"就是请求一次
+        // 重绘，让这一层（通常是对话框窗口）在本帧被重新合成提交。空实现会让
+        // Show()/showModal() 之后窗口一直不刷新。
+        if(owner_)
+            TVPPostWindowUpdate(owner_);
+    }
+
+    // 游戏内置对话框（退出确认等）走的就是 Window.showModal()。
+    //
+    // **必须阻塞脚本**：KAG 的标准写法是
+    //     var win = new YesNoDialogWindow(...);
+    //     win.showModal();          // Win32 上是嵌套消息循环，用户不点不返回
+    //     var res = win.result;     // 关闭后读结果
+    //     invalidate win;
+    // 一旦 showModal() 立即返回，脚本马上执行 `invalidate win` —— 真机
+    // 2026-09-18 13:20:09.768 就是 ShowModal 与 HostWindowLayer destroyed 同毫秒，
+    // 对话框连一帧都没画出来（用户看到的"游戏自带弹窗不显示"）。
+    //
+    // 这里按 Kirikiroid2 的 cocos2d 实现（MainScene.cpp）做同样的嵌套循环：
+    // 每帧调 Application::Run()（消息/脚本/合成/绘制）+ TVPDrawSceneOnce(30)
+    // （呈现 + 节拍），直到对话框自己 close()（Close() 里把 modal_ 置 false）。
+    // 输入来自宿主：engine_send_input 现在允许任意线程投递，模态循环每帧调
+    // PumpModalInput() 把它派发掉。
+    void ShowWindowAsModal() override {
+        visible_ = true;
+        if(owner_)
+            TVPPostWindowUpdate(owner_);
+        // 边沿记录：游戏可能反复调 showModal()，逐次打日志会让日志无限增长
+        // （老实现就是每条一次 warn，正是"错误日志一直涨"的来源）。
+        if(!modal_logged_) {
+            modal_logged_ = true;
+            spdlog::info("HostWindowLayer::ShowWindowAsModal: 进入模态循环"
+                         "（阻塞脚本直到对话框关闭）");
+        }
+
+        // 兜底上限：绝不能因为"对话框没人关"把渲染线程永久钉死（那时壳连
+        // 退出游戏都排不进来）。2 分钟足够读完任何确认框。
+        constexpr int64_t kModalMaxMs = 120000;
+        const auto modalStart = std::chrono::steady_clock::now();
+        modal_ = true;
+        // 登记为"当前模态窗口"：输入派发优先发给它（否则对话框点不动，而且
+        // 点击会落到主窗口、在 Conductor 阻塞时重入主窗口脚本）。RAII 保证
+        // 异常路径也会摘掉登记。
+        struct ModalWindowGuard {
+            explicit ModalWindowGuard(tTJSNI_Window *w) : win(w) {
+                TVPAddModalWindow(w);
+            }
+            ~ModalWindowGuard() { TVPRemoveModalWindow(win); }
+            tTJSNI_Window *win;
+        } modalWindowGuard(owner_);
+        int frames = 0;
+        while(modal_) {
+            if(TVPTerminated)
+                break;
+            if(owner_ && !TVPIsWindowRegistered(owner_))
+                break; // 窗口被脚本 invalidate 掉了，没有可等的对话框
+            krkr::host::PumpModalInput();
+            if(::Application)
+                ::Application->Run();
+            krkr::stall::MarkStage("host: 等待模态对话框（脚本阻塞在 showModal）");
+            const int remain = TVPDrawSceneOnce(30);
+            ++frames;
+            if(remain > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(remain));
+            if(std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - modalStart)
+                   .count() > kModalMaxMs) {
+                spdlog::warn("HostWindowLayer: 模态对话框 {}s 未被关闭，"
+                             "强制结束模态循环（帧数={}）",
+                             kModalMaxMs / 1000, frames);
+                break;
+            }
+        }
+        modal_ = false;
+        spdlog::info("HostWindowLayer::ShowWindowAsModal: 模态循环结束（帧数={}）",
+                     frames);
+    }
+
+    bool GetVisible() override { return visible_; }
+
+    void SetVisible(bool bVisible) override {
+        visible_ = bVisible;
+        // 脚本用 visible=false 收掉模态对话框（KAG 的另一条写法）：也要让
+        // ShowWindowAsModal 的嵌套循环退出，否则渲染线程会一直卡在里面。
+        if(!bVisible)
+            modal_ = false;
+    }
+
+    const char *GetCaption() override { return caption_.c_str(); }
+
+    void SetCaption(const std::string &cap) override { caption_ = cap; }
+
+    void SetWidth(tjs_int w) override { width_ = w; }
+
+    void SetHeight(tjs_int h) override { height_ = h; }
+
+    void SetSize(tjs_int w, tjs_int h) override {
+        width_ = w;
+        height_ = h;
+    }
+
+    void GetSize(tjs_int &w, tjs_int &h) override {
+        w = width_;
+        h = height_;
+    }
+
+    [[nodiscard]] tjs_int GetWidth() const override { return width_; }
+
+    [[nodiscard]] tjs_int GetHeight() const override { return height_; }
+
+    void GetWinSize(tjs_int &w, tjs_int &h) override {
+        w = width_;
+        h = height_;
+    }
+
+    void SetZoom(tjs_int numer, tjs_int denom) override {
+        ZoomNumer = numer;
+        ZoomDenom = denom;
+    }
+
+    void UpdateDrawBuffer(iTVPTexture2D *tex) override {
+        // Blit the composited scene texture to the render target.
+        // When an IOSurface is attached, this goes directly to the shared
+        // SurfaceTexture (zero-copy to the host shell). Otherwise, falls back
+        // to the EGL Pbuffer for glReadPixels-based retrieval.
+        if(!tex)
+            return;
+
+        // 上一会话残留的窗体仍会被投递重绘（引擎重启只清空窗口表，窗口对象还
+        // 活着，见 WindowIntf.cpp 的闸门说明）：它的源纹理属于**旧 EGL 上下文**
+        // 或被新上下文复用的无关纹理，挂 FBO 报 INCOMPLETE_ATTACHMENT，blit
+        // 出来是黑帧，还会盖掉当前会话已经画好的画面。这里再挡一道（引擎侧
+        // UpdateContent 已挡，这里是兜底 + 判据）。只警告一次，避免每帧刷屏。
+        if(owner_ && !TVPIsWindowRegistered(owner_)) {
+            static const tTJSNI_Window *s_lastLeaked = nullptr;
+            if(s_lastLeaked != owner_) {
+                s_lastLeaked = owner_;
+                spdlog::warn("HostWindowLayer: 窗体 {} 已不在窗口表（上一会话残留），"
+                             "跳过 blit —— 源纹理属于旧 EGL 上下文，只会画黑",
+                             static_cast<const void *>(owner_));
+            }
+            return;
+        }
+
+        const tjs_uint tw = tex->GetWidth();
+        const tjs_uint th = tex->GetHeight();
+        if(tw == 0 || th == 0)
+            return;
+
+        EnsureBlitResources();
+
+        auto &egl = krkr::GetEngineEGLContext();
+
+        // ── Phase 1: Prepare the blit source texture ──────────────
+        // This MUST happen BEFORE BindRenderTarget(), because
+        // GetScanLineForRead() internally calls TVPSetRenderTarget()
+        // which changes the FBO binding. We need the engine's FBO
+        // to be active for reading pixels, then bind the default
+        // framebuffer (0) for the actual blit.
+        const uint32_t nativeGLTex = tex->GetNativeGLTextureId();
+        GLuint blitSrcTexture;
+
+        // 纹理名可能已经失效：换游戏/二次打开时 EGL 上下文被销毁重建，上个
+        // 上下文里的纹理名在新上下文里可能根本不是纹理（真机上表现为 SourceSample
+        // 恒报 FBO incomplete 0x8CD6 + PostBlit 恒黑）。这里显式校验一次：名字
+        // 无效就走下面的 CPU 回读路径 —— 宁可慢一帧上传，也不能整块黑掉。
+        const bool nativeTexValid =
+            nativeGLTex != 0 && glIsTexture(static_cast<GLuint>(nativeGLTex)) != 0;
+        if(nativeGLTex != 0 && !nativeTexValid) {
+            spdlog::warn("HostWindowLayer: nativeTex={} 不是当前上下文的纹理"
+                         "（旧上下文残留？），退回 CPU 回读路径",
+                         static_cast<unsigned>(nativeGLTex));
+        }
+
+        if(nativeTexValid) {
+            // GPU fast-path: the composited scene is already in a GL texture.
+            // We must detach it from the engine's FBO first to avoid
+            // sampling a texture that is still an FBO attachment.
+            // TVPSetRenderTarget(0) will unbind any texture from the engine
+            // FBO.
+            extern void TVPSetRenderTarget(GLuint);
+
+            // ── 决定性探针：对比 blit 源纹理(nativeGLTex) 与引擎当前合成所写的
+            // render-target 附件纹理 id。
+            //   nativeGLTex == rtTex -> 引擎写进了我们采样的同一纹理：
+            //      源黑 = 引擎画了黑/没画（问题在合成内容/脚本，非纹理脱节）。
+            //   nativeGLTex != rtTex -> 引擎画进了别的纹理：二次打开主
+            //   DrawBuffer 与
+            //      blit 源脱节（重启状态残留）。仅 KRKR_RENDER_PROBE 时编译。
+#if defined(KRKR_RENDER_PROBE)
+            {
+                GLint curFbo = 0;
+                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &curFbo);
+                GLint rtTex = 0, rtType = 0;
+                if(curFbo != 0) {
+                    glGetFramebufferAttachmentParameteriv(
+                        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                        GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &rtType);
+                    if(rtType == GL_TEXTURE) {
+                        glGetFramebufferAttachmentParameteriv(
+                            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &rtTex);
+                    }
+                }
+                spdlog::info(
+                    "HostWindowLayer::RTProbe: blitSrcTex={} engineCurFbo={} "
+                    "fboAttachedTex={} rtType=0x{:x}{}",
+                    static_cast<unsigned>(nativeGLTex),
+                    static_cast<int>(curFbo), static_cast<int>(rtTex),
+                    static_cast<unsigned>(rtType),
+                    (nativeGLTex == static_cast<uint32_t>(rtTex)) ? " [SAME]"
+                                                                  : " [DIFF]");
+            }
+#endif // KRKR_RENDER_PROBE
+
+            TVPSetRenderTarget(0);
+            blitSrcTexture = static_cast<GLuint>(nativeGLTex);
+        } else {
+            // CPU fallback: read pixel data and upload to our blit texture.
+            blitSrcTexture = blit_texture_;
+            const tjs_int pitch = tex->GetPitch();
+            const void *pixelData = tex->GetPixelData();
+            if(!pixelData) {
+                // Fallback: read line by line via GetScanLineForRead.
+                // NOTE: This may call TVPSetRenderTarget() internally,
+                // which changes the current FBO binding — that's fine
+                // because we haven't bound the IOSurface FBO yet.
+                if(blit_pixel_buf_.size() < static_cast<size_t>(tw * th * 4)) {
+                    blit_pixel_buf_.resize(tw * th * 4);
+                }
+                for(tjs_uint y = 0; y < th; ++y) {
+                    const void *line = tex->GetScanLineForRead(y);
+                    if(line) {
+                        std::memcpy(blit_pixel_buf_.data() + y * tw * 4, line,
+                                    tw * 4);
+                    }
+                }
+                pixelData = blit_pixel_buf_.data();
+            }
+
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, blit_texture_);
+            // Use GL_UNPACK_ROW_LENGTH if pitch differs from width*4
+            if(pitch != static_cast<tjs_int>(tw * 4)) {
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, pitch / 4);
+            }
+            // Use glTexSubImage2D when the texture size hasn't changed,
+            // avoiding per-frame texture memory reallocation.
+            if(blit_tex_w_ == tw && blit_tex_h_ == th) {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                                static_cast<GLsizei>(tw),
+                                static_cast<GLsizei>(th), GL_RGBA,
+                                GL_UNSIGNED_BYTE, pixelData);
+            } else {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                             static_cast<GLsizei>(tw), static_cast<GLsizei>(th),
+                             0, GL_RGBA, GL_UNSIGNED_BYTE, pixelData);
+                blit_tex_w_ = tw;
+                blit_tex_h_ = th;
+            }
+            if(pitch != static_cast<tjs_int>(tw * 4)) {
+                glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+            }
+        }
+
+        // ── 诊断插桩：记录 blit 分支，并对 blit 源纹理抽样 ──
+        // 目的：区分黑屏（IOSurface 全黑）的根因归属。
+        //   SourceSample !黑 -> 引擎合成纹理有画面，黑屏在「blit 到
+        //   IOSurface」这步 SourceSample 全黑 -> 引擎 GL
+        //   合成本身没把画面画进源纹理。
+        // 频率提到每 5 帧，并在同一采样点对源纹理连续读两次（相隔若干 draw 后）
+        // 以排除「单帧瞬时闪」；同时打印全局图层对象数 layers，区分
+        // 「引擎没建/没东西画」与「画了但没进源纹理」两条线。
+        // 诊断插桩：仅当编译期定义 KRKR_RENDER_PROBE 时运行（每 5
+        // 帧读像素+打日志， 属黑屏/渲染诊断探针）。默认 release 关闭，避免每帧
+        // glReadPixels 与日志刷屏； 遇到黑屏/渲染问题再打开。
+#if defined(KRKR_RENDER_PROBE)
+        static int s_blitDbg = 0;
+        const bool kBlitDump = ((s_blitDbg++) % 5) == 1;
+#else
+        const bool kBlitDump = false;
+#endif
+        if(kBlitDump) {
+            // 引擎本段(自上次 GetRenderStat 清零以来)实际执行的 GL 绘制次数：
+            //   draw 持续增长 -> 引擎在合成图层，黑的是「画了但没进 tex4」
+            //   draw 归零      -> 引擎没发起合成，问题在调度/无可见图层
+            unsigned int engDraw = 0;
+            uint64_t engVmem = 0;
+            if(::TVPGetRenderManager()) {
+                ::TVPGetRenderManager()->GetRenderStat(engDraw, engVmem);
+            }
+            spdlog::info(
+                "HostWindowLayer::UpdateDrawBuffer: path={} nativeTex={} "
+                "srcTex={} blitTex={} {}x{} texInternal={}x{} layers={} "
+                "draw={}",
+                nativeGLTex ? "GPU" : "CPU", nativeGLTex, blitSrcTexture,
+                blit_texture_, static_cast<unsigned>(tw),
+                static_cast<unsigned>(th),
+                static_cast<unsigned>(tex->GetInternalWidth()),
+                static_cast<unsigned>(tex->GetInternalHeight()),
+                TVPGetLayerCount(), engDraw);
+            if(blitSrcTexture != 0) {
+                GLint prevFbo = 0;
+                glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+                GLuint dbgFbo = 0;
+                glGenFramebuffers(1, &dbgFbo);
+                glBindFramebuffer(GL_FRAMEBUFFER, dbgFbo);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                       GL_TEXTURE_2D, blitSrcTexture, 0);
+                int nonBlack =
+                    0; // 提升到 blitSrcTexture 作用域，供下方黑屏探针使用
+                if(glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                   GL_FRAMEBUFFER_COMPLETE) {
+                    // glFlush 一次后再采，确认 readback
+                    // 读到最终合成结果而非中途状态
+                    glFlush();
+                    uint64_t sR = 0, sG = 0, sB = 0, sA = 0;
+                    unsigned char px[4];
+                    for(int gy = 0; gy < 5; ++gy)
+                        for(int gx = 0; gx < 5; ++gx) {
+                            const int x = (int)((gx + 0.5f) *
+                                                static_cast<float>(tw) / 5.0f);
+                            const int y = (int)((gy + 0.5f) *
+                                                static_cast<float>(th) / 5.0f);
+                            px[0] = px[1] = px[2] = px[3] = 0;
+                            glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                                         px);
+                            sR += px[0];
+                            sG += px[1];
+                            sB += px[2];
+                            sA += px[3];
+                            if(px[0] > 8 || px[1] > 8 || px[2] > 8)
+                                ++nonBlack;
+                        }
+                    spdlog::info("HostWindowLayer::SourceSample: "
+                                 "nonBlack={}/25 avg=({},{},{},{})",
+                                 nonBlack, (int)(sR / 25), (int)(sG / 25),
+                                 (int)(sB / 25), (int)(sA / 25));
+                } else {
+                    spdlog::warn(
+                        "HostWindowLayer::SourceSample: FBO incomplete 0x{:x}",
+                        glCheckFramebufferStatus(GL_FRAMEBUFFER));
+                }
+                glBindFramebuffer(GL_FRAMEBUFFER, prevFbo);
+                glDeleteFramebuffers(1, &dbgFbo);
+
+                // ── 黑屏探针 ─────────────────────────────────────────────
+                // 判定：引擎在持续绘制(engDraw>0) 但 blit
+                // 源纹理采样全黑(nonBlack==0)。 连续 kBlackReportThreshold
+                // 次出现即判定黑屏已持久化，上报：
+                //   1) 视频 overlay 是否在播（验证 krmovie Present stub
+                //   阻塞假设）； 2)
+                //   引擎当前绘制计数与图层数，供定位脚本/调度问题。
+                // 视频 overlay 播放期间场景本身就可能是黑的（KAG 把图层清掉、
+                // 画面全靠 overlay），此时黑屏不是异常，不计数。
+                if(engDraw > 0 && nonBlack == 0 && !VideoOverlayFrameActive()) {
+                    ++s_blackSampleCount;
+                    if(s_blackSampleCount >= kBlackReportThreshold &&
+                       !s_blackReported) {
+                        s_blackReported = true;
+                        std::string ovl = tTJSNI_VideoOverlay::DumpDebugStats();
+                        spdlog::warn("HostWindowLayer::BlackScreen: engine "
+                                     "keeps drawing (draw={}, layers={}) but "
+                                     "blit source is black. {}",
+                                     engDraw, TVPGetLayerCount(), ovl);
+                    }
+                } else {
+                    s_blackSampleCount = 0;
+                    s_blackReported = false;
+                }
+            }
+        }
+
+        // ── Phase 2: Bind IOSurface render target and blit ───────
+        // Now that the source texture is ready, switch to the
+        // IOSurface FBO (or Pbuffer) for the actual blit output.
+        egl.BindRenderTarget();
+
+        // Determine the actual render target dimensions
+        uint32_t fbW, fbH;
+        if(egl.HasIOSurface()) {
+            fbW = egl.GetIOSurfaceWidth();
+            fbH = egl.GetIOSurfaceHeight();
+        } else if(egl.HasNativeWindow()) {
+            fbW = egl.GetNativeWindowWidth();
+            fbH = egl.GetNativeWindowHeight();
+        } else {
+            fbW = egl.GetWidth();
+            fbH = egl.GetHeight();
+        }
+        // Compute letterbox/pillarbox viewport to preserve game aspect ratio.
+        float texAspect = static_cast<float>(tw) / static_cast<float>(th);
+        float fbAspect = static_cast<float>(fbW) / static_cast<float>(fbH);
+        GLsizei vpX = 0, vpY = 0;
+        GLsizei vpW = static_cast<GLsizei>(fbW);
+        GLsizei vpH = static_cast<GLsizei>(fbH);
+        if(texAspect > fbAspect) {
+            vpW = static_cast<GLsizei>(fbW);
+            vpH = static_cast<GLsizei>(static_cast<float>(fbW) / texAspect);
+            vpY = static_cast<GLsizei>((fbH - vpH) / 2);
+        } else if(texAspect < fbAspect) {
+            vpH = static_cast<GLsizei>(fbH);
+            vpW = static_cast<GLsizei>(static_cast<float>(fbH) * texAspect);
+            vpX = static_cast<GLsizei>((fbW - vpW) / 2);
+        }
+
+        // Clear entire framebuffer to black (produces the letterbox bars)
+        glViewport(0, 0, static_cast<GLsizei>(fbW), static_cast<GLsizei>(fbH));
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        // Set viewport to the aspect-correct sub-region
+        glViewport(vpX, vpY, vpW, vpH);
+
+        // Update DrawDevice dest rect so coordinate transforms
+        // (surface pixels → game layer) work correctly with letterbox offset.
+        if(owner_) {
+            auto *dd = owner_->GetDrawDevice();
+            if(dd) {
+                tTVPRect dest;
+                dest.left = static_cast<tjs_int>(vpX);
+                dest.top = static_cast<tjs_int>(vpY);
+                dest.right = static_cast<tjs_int>(vpX + vpW);
+                dest.bottom = static_cast<tjs_int>(vpY + vpH);
+                dd->SetDestRectangle(dest);
+                dd->SetClipRectangle(dest);
+                dd->SetViewport(dest);
+                dd->SetWindowSize(static_cast<tjs_int>(fbW),
+                                  static_cast<tjs_int>(fbH));
+            }
+        }
+
+        // Bind the source texture for the fullscreen blit
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, blitSrcTexture);
+
+        // Draw fullscreen quad
+        glUseProgram(blit_program_);
+        glUniform1i(blit_tex_uniform_, 0);
+        // In IOSurface mode, the surface has a top-down coordinate system
+        // while OpenGL renders bottom-up, so we need to flip Y.
+        // Android SurfaceTexture (WindowSurface) does NOT need flipping
+        // because eglSwapBuffers → SurfaceTexture → host texture widget
+        // handles the coordinate transform automatically.
+        // When using a native OGL texture from the engine (GPU path), the
+        // texture is already in OGL convention (bottom-up), so we may need
+        // to flip when rendering to IOSurface but not to Pbuffer/WindowSurface.
+        glUniform1f(blit_flipy_uniform_, egl.HasIOSurface() ? 1.0f : 0.0f);
+
+        // Compute UV scale to handle power-of-two textures.
+        // The engine texture's logical size (tw x th) may be smaller
+        // than the actual GL texture (internalW x internalH).
+        float uvScaleU = 1.0f, uvScaleV = 1.0f;
+        if(nativeGLTex != 0) {
+            const tjs_uint intW = tex->GetInternalWidth();
+            const tjs_uint intH = tex->GetInternalHeight();
+            if(intW > 0 && intH > 0) {
+                uvScaleU = static_cast<float>(tw) / static_cast<float>(intW);
+                uvScaleV = static_cast<float>(th) / static_cast<float>(intH);
+            }
+        }
+        glUniform2f(blit_uvscale_uniform_, uvScaleU, uvScaleV);
+
+        glBindBuffer(GL_ARRAY_BUFFER, blit_vbo_);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
+                              (void *)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
+                              (void *)(2 * sizeof(float)));
+
+        glDisable(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        glDisableVertexAttribArray(0);
+        glDisableVertexAttribArray(1);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glUseProgram(0);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        // 诊断：blit 全屏 quad 后立刻读当前绑定 FBO（IOSurface fbo2）中心像素
+        //  + glGetError，区分「blit 绘制没写进 fbo2」还是「写进去了但 IOSurface
+        //  层未落地」。
+        // 中心像素非黑 -> blit 写入成功，问题在
+        // SurfaceTexture/宿主侧落地与同步； 中心像素黑   -> blit 全屏 quad
+        // 绘制本身失败（shader/uniform/状态）。
+        if(kBlitDump) {
+            GLenum postErr = glGetError();
+            unsigned char dbgPx[4] = { 0, 0, 0, 0 };
+            GLint dbgFbo = 0;
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &dbgFbo);
+            if(fbW > 0 && fbH > 0) {
+                glReadPixels(static_cast<GLint>(fbW / 2),
+                             static_cast<GLint>(fbH / 2), 1, 1, GL_RGBA,
+                             GL_UNSIGNED_BYTE, dbgPx);
+            }
+            spdlog::info("HostWindowLayer::PostBlit: err=0x{:x} curFbo={} "
+                         "size={}x{} center=({},{},{},{})",
+                         static_cast<unsigned>(postErr), dbgFbo,
+                         static_cast<unsigned>(fbW), static_cast<unsigned>(fbH),
+                         dbgPx[0], dbgPx[1], dbgPx[2], dbgPx[3]);
+        }
+
+        // overlay 模式电影：视频帧叠画在场景之上；Live2D 等 postDrawHook 内容
+        // 仍可再压一层。
+        DrawVideoOverlay(tw, th);
+
+        if(g_postDrawHook)
+            g_postDrawHook();
+
+        // In IOSurface/WindowSurface mode, glFlush() is sufficient —
+        // IOSurface has GPU-GPU sync, and WindowSurface (SurfaceTexture)
+        // is synchronized by eglSwapBuffers in TVPForceSwapBuffer.
+        // In Pbuffer mode, glFinish() is required because the legacy
+        // path uses glReadPixels which needs GPU to be done.
+        if(egl.HasIOSurface() || egl.HasNativeWindow()) {
+            glFlush();
+        } else {
+            glFinish();
+        }
+
+        // Mark the frame as dirty so TVPForceSwapBuffer() knows there is
+        // new content to present.  Without this, eglSwapBuffers would be
+        // called every tick even when no rendering happened, causing
+        // double-buffer flicker (alternating between current and stale
+        // back-buffer contents).
+        egl.MarkFrameDirty();
+    }
+
+    // ── 视频 overlay（overlay 模式电影）─────────────────────────────
+    // 纹理与程序属于当前 EGL 上下文；上下文重建后纹理名可能被新上下文复用或
+    // 失效，靠 glIsTexture 校验（与 blit 源纹理同一种防旧上下文残留做法）。
+    void EnsureVideoOverlayResources() {
+        if(video_overlay_texture_ == 0) {
+            glGenTextures(1, &video_overlay_texture_);
+            glBindTexture(GL_TEXTURE_2D, video_overlay_texture_);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            video_tex_w_ = video_tex_h_ = 0;
+            video_overlay_serial_ = 0;
+        }
+        if(video_overlay_program_ == 0) {
+            video_overlay_program_ = kBuildVideoOverlayProgram();
+            if(video_overlay_program_ != 0) {
+                video_tex_uniform_ =
+                    glGetUniformLocation(video_overlay_program_, "uTex");
+                video_rect_uniform_ =
+                    glGetUniformLocation(video_overlay_program_, "uRect");
+                spdlog::info("HostWindowLayer: video overlay resources "
+                             "initialized (program={})",
+                             video_overlay_program_);
+            }
+        }
+    }
+
+    // 调用点：场景 blit 之后、postDrawHook 之前；viewport 已是 letterbox 区域，
+    // FBO 是宿主 render target。仅在新帧（serial 变化）时上传纹理。
+    void DrawVideoOverlay(tjs_uint sceneW, tjs_uint sceneH) {
+        tTVPRect dest;
+        {
+            std::lock_guard<std::mutex> lk(s_videoOverlayMtx);
+            if(s_videoOverlaySerial == 0 || s_videoOverlayWidth <= 0 ||
+               s_videoOverlayHeight <= 0)
+                return;
+            EnsureVideoOverlayResources();
+            if(video_overlay_texture_ == 0)
+                return;
+            if(glIsTexture(video_overlay_texture_) == 0) {
+                // 旧 EGL 上下文残留的纹理名：重建并重传本帧
+                video_overlay_texture_ = 0;
+                video_overlay_serial_ = 0;
+                EnsureVideoOverlayResources();
+                if(video_overlay_texture_ == 0)
+                    return;
+            }
+            if(video_overlay_serial_ != s_videoOverlaySerial) {
+                glBindTexture(GL_TEXTURE_2D, video_overlay_texture_);
+                if(video_tex_w_ != static_cast<tjs_uint>(s_videoOverlayWidth) ||
+                   video_tex_h_ !=
+                       static_cast<tjs_uint>(s_videoOverlayHeight)) {
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, s_videoOverlayWidth,
+                                 s_videoOverlayHeight, 0, GL_RGBA,
+                                 GL_UNSIGNED_BYTE, s_videoOverlayRgba.data());
+                    video_tex_w_ = s_videoOverlayWidth;
+                    video_tex_h_ = s_videoOverlayHeight;
+                } else {
+                    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, s_videoOverlayWidth,
+                                    s_videoOverlayHeight, GL_RGBA,
+                                    GL_UNSIGNED_BYTE,
+                                    s_videoOverlayRgba.data());
+                }
+                video_overlay_serial_ = s_videoOverlaySerial;
+            }
+            dest = s_videoOverlayDest;
+        }
+
+        if(dest.get_width() <= 0 || dest.get_height() <= 0) {
+            dest = tTVPRect(0, 0, static_cast<tjs_int>(sceneW),
+                            static_cast<tjs_int>(sceneH));
+        }
+        const float sw = sceneW ? static_cast<float>(sceneW) : 1.0f;
+        const float sh = sceneH ? static_cast<float>(sceneH) : 1.0f;
+        // 游戏坐标（自上而下）→ NDC：画面上方 = NDC +1，故顶边映射到 ymax。
+        const float x0 = 2.0f * static_cast<float>(dest.left) / sw - 1.0f;
+        const float x1 = 2.0f * static_cast<float>(dest.right) / sw - 1.0f;
+        const float yTop = 1.0f - 2.0f * static_cast<float>(dest.top) / sh;
+        const float yBot = 1.0f - 2.0f * static_cast<float>(dest.bottom) / sh;
+
+        glUseProgram(video_overlay_program_);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, video_overlay_texture_);
+        glUniform1i(video_tex_uniform_, 0);
+        glUniform4f(video_rect_uniform_, x0, yBot, x1, yTop);
+        glDisable(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        static const float kUnitQuad[] = { -1.f, -1.f, 1.f, -1.f,
+                                           -1.f, 1.f,  1.f, 1.f };
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, kUnitQuad);
+        // 判定性探针：真机上"engine 侧 submitted ok=1、画面却没有视频"时，必须分清
+        //   画之前/之后的中心像素不同 -> 视频**确实落进 framebuffer**（问题在之后被
+        //   别的绘制覆盖，例如 KAG 档的 krkrgles 呈现）；
+        //   像素没变 -> 这次绘制本身没生效（program/FBO/viewport 引起的）。
+        // 只记前 3 次 + 每 120 次一条；每个像素 1 次 glReadPixels，可忽略。
+        static std::atomic<int> s_videoDrawLogs{ 0 };
+        const int drawLogIndex = s_videoDrawLogs.fetch_add(1) + 1;
+        const bool logDraw = (drawLogIndex <= 3 || (drawLogIndex % 120) == 0);
+        unsigned char pxBefore[4] = { 0, 0, 0, 0 };
+        GLint probeX = 0, probeY = 0;
+        if(logDraw) {
+            GLint vp[4] = { 0, 0, 0, 0 };
+            glGetIntegerv(GL_VIEWPORT, vp);
+            probeX = vp[0] + vp[2] / 2;
+            probeY = vp[1] + vp[3] / 2;
+            glReadPixels(probeX, probeY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                         pxBefore);
+        }
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glDisableVertexAttribArray(0);
+        if(logDraw) {
+            unsigned char pxAfter[4] = { 0, 0, 0, 0 };
+            GLint fbo = 0;
+            GLint vp[4] = { 0, 0, 0, 0 };
+            const GLenum err = glGetError();
+            glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+            glGetIntegerv(GL_VIEWPORT, vp);
+            glReadPixels(probeX, probeY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                         pxAfter);
+            spdlog::info("DrawVideoOverlay: 第 {} 次 serial={} dest=({},{})({},{}"
+                         ") scene={}x{} fbo={} vp=({},{},{},{}) err=0x{:x} "
+                         "画前=({},{},{},{}) 画后=({},{},{},{})",
+                         drawLogIndex, s_videoOverlaySerial, dest.left, dest.top,
+                         dest.right, dest.bottom, sceneW, sceneH, fbo, vp[0],
+                         vp[1], vp[2], vp[3], static_cast<unsigned>(err),
+                         pxBefore[0], pxBefore[1], pxBefore[2], pxBefore[3],
+                         pxAfter[0], pxAfter[1], pxAfter[2], pxAfter[3]);
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glUseProgram(0);
+    }
+
+    void InvalidateClose() override { closing_ = true; }
+
+    bool GetWindowActive() override { return active_; }
+
+    void Close() override {
+        // ── 非主窗口（KAG 的对话框/关于窗口是独立 Window）──────────────
+        // 关掉对话框**与游戏退出无关**，而且必须走这里让模态循环退出：
+        // KAG 的按钮处理是 `result = true; close();`，模态循环靠 modal_ 收尾；
+        // 若把它当成"游戏关窗退出"（下面那条路），模态循环就永远等不到结束条件。
+        const bool isMain = !owner_ || owner_->IsMainWindow();
+        if(!isMain) {
+            closing_ = true;
+            visible_ = false;
+            modal_ = false; // 让 ShowWindowAsModal 的嵌套循环退出
+            if(owner_)
+                TVPPostWindowUpdate(owner_);
+            spdlog::debug("HostWindowLayer::Close: 子窗口（对话框）关闭，结束模态等待");
+            return;
+        }
+        // 宿主要求"关窗前先问用户"时，这里**不拆窗口也不终止**：KAG 的退出菜单
+        // （kag.close() → MainWindow.close() → Window.close()）唯一的下场就是这里，
+        // 而用户要的正是"选继续就接着玩"。请求交给 engine_tick 用
+        // ENGINE_RESULT_WINDOW_CLOSE_REQUESTED 报给壳；壳确认后才走下面的真关窗。
+        if(krkr::host::RequestWindowClose())
+            return;
+        closing_ = true;
+        spdlog::debug("HostWindowLayer::Close called");
+        // 这是"游戏关窗退出"的那条路（实测 千恋万花 退出菜单走的就是它）：窗口
+        // 从此不再重绘，宿主即便在确认框里选"继续游戏"也只是在空场景上继续跑。
+        // 标记原因，engine_tick 会用 ENGINE_RESULT_WINDOW_CLOSED 告诉宿主。
+        TVPTerminateWindowClosed = true;
+        TVPTerminateAsync(0);
+    }
+
+    void OnCloseQueryCalled(bool b) override {
+        if(b) {
+            Close();
+        }
+    }
+
+    void InternalKeyDown(tjs_uint16 key, tjs_uint32 shift) override {}
+
+    void OnKeyUp(tjs_uint16 vk, int shift) override {}
+
+    void OnKeyPress(tjs_uint16 vk, int repeat, bool prevkeystate,
+                    bool convertkey) override {}
+
+    [[nodiscard]] tTVPImeMode GetDefaultImeMode() const override {
+        return imDisable;
+    }
+
+    void SetImeMode(tTVPImeMode mode) override {}
+
+    void ResetImeMode() override {}
+
+    void UpdateWindow(tTVPUpdateType type) override {
+        // Rendering is driven by engine_tick / engine_read_frame_rgba
+    }
+
+    void SetVisibleFromScript(bool b) override {
+        // 边沿记录：`Window.visible=...` 是"游戏自己弹窗/关窗"的关键指纹。内置弹窗
+        // 若不显示，这一行能区分"脚本压根没让它可见"与"可见了但没被合成"。
+        if(b != visible_) {
+            spdlog::info("HostWindowLayer: 脚本置可见性 {} -> {}",
+                         visible_ ? "true" : "false", b ? "true" : "false");
+        }
+        visible_ = b;
+    }
+
+    void SetUseMouseKey(bool b) override {}
+
+    [[nodiscard]] bool GetUseMouseKey() const override { return false; }
+
+    void ResetMouseVelocity() override {}
+
+    void ResetTouchVelocity(tjs_int id) override {}
+
+    bool GetMouseVelocity(float &x, float &y, float &speed) const override {
+        x = y = speed = 0;
+        return false;
+    }
+
+    void TickBeat() override {
+        // Called every ~50ms; nothing to do — the host shell owns the UI
+    }
+
+    TVPOverlayNode *GetPrimaryArea() override { return nullptr; }
+
+private:
+    void EnsureBlitResources() {
+        if(blit_program_ != 0)
+            return;
+
+        // Vertex shader: fullscreen quad with optional Y flip and UV scale
+        const char *vs_src = R"(#version 300 es
+            layout(location = 0) in vec2 aPos;
+            layout(location = 1) in vec2 aUV;
+            uniform float uFlipY;
+            uniform vec2 uUVScale;
+            out vec2 vUV;
+            void main() {
+                gl_Position = vec4(aPos, 0.0, 1.0);
+                vec2 uv = aUV * uUVScale;
+                vUV = vec2(uv.x, mix(uv.y, uUVScale.y - uv.y, uFlipY));
+            }
+        )";
+
+        const char *fs_src = R"(#version 300 es
+            precision mediump float;
+            in vec2 vUV;
+            out vec4 fragColor;
+            uniform sampler2D uTex;
+            void main() {
+                fragColor = texture(uTex, vUV);
+            }
+        )";
+
+        auto compileShader = [](GLenum type, const char *src) -> GLuint {
+            GLuint s = glCreateShader(type);
+            glShaderSource(s, 1, &src, nullptr);
+            glCompileShader(s);
+            GLint ok = 0;
+            glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+            if(!ok) {
+                char log[512];
+                glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+                spdlog::error("Blit shader compile error: {}", log);
+            }
+            return s;
+        };
+
+        GLuint vs = compileShader(GL_VERTEX_SHADER, vs_src);
+        GLuint fs = compileShader(GL_FRAGMENT_SHADER, fs_src);
+
+        blit_program_ = glCreateProgram();
+        glAttachShader(blit_program_, vs);
+        glAttachShader(blit_program_, fs);
+        glLinkProgram(blit_program_);
+
+        GLint ok = 0;
+        glGetProgramiv(blit_program_, GL_LINK_STATUS, &ok);
+        if(!ok) {
+            char log[512];
+            glGetProgramInfoLog(blit_program_, sizeof(log), nullptr, log);
+            spdlog::error("Blit program link error: {}", log);
+        }
+
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+
+        blit_tex_uniform_ = glGetUniformLocation(blit_program_, "uTex");
+        blit_flipy_uniform_ = glGetUniformLocation(blit_program_, "uFlipY");
+        blit_uvscale_uniform_ = glGetUniformLocation(blit_program_, "uUVScale");
+
+        // Fullscreen quad: position (x,y) + texcoord (u,v)
+        // Y-flipped: top-left of texture → top-left of screen
+        // OpenGL NDC: bottom-left is (-1,-1), top-right is (1,1)
+        // Texture: (0,0) is top-left in krkr2 convention
+        const float quad[] = {
+            // pos        // uv
+            -1.f, -1.f, 0.f, 1.f, // bottom-left  → tex bottom (v=1)
+            1.f,  -1.f, 1.f, 1.f, // bottom-right
+            -1.f, 1.f,  0.f, 0.f, // top-left     → tex top (v=0)
+            1.f,  1.f,  1.f, 0.f, // top-right
+        };
+
+        glGenBuffers(1, &blit_vbo_);
+        glBindBuffer(GL_ARRAY_BUFFER, blit_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+        // Create blit texture
+        glGenTextures(1, &blit_texture_);
+        glBindTexture(GL_TEXTURE_2D, blit_texture_);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        spdlog::info("HostWindowLayer: blit resources initialized (program={})",
+                     blit_program_);
+    }
+
+    tTJSNI_Window *owner_;
+    bool visible_;
+    /// showModal() 的诊断日志只记一次（边沿），避免游戏反复调用时刷日志。
+    bool modal_logged_ = false;
+    /// 正在 ShowWindowAsModal 的嵌套循环里等用户操作；Close() 会把它置 false。
+    bool modal_ = false;
+    std::string caption_;
+    tjs_int width_;
+    tjs_int height_;
+    bool active_;
+    bool closing_;
+
+    // Cached mouse position in surface coordinates.
+    // Updated by EngineLoop on pointer events, read by GetCursorPos().
+    tjs_int last_mouse_x_ = 0;
+    tjs_int last_mouse_y_ = 0;
+
+    // Blit resources for rendering to EGL pbuffer
+    GLuint blit_program_ = 0;
+    GLuint blit_vbo_ = 0;
+    GLuint blit_texture_ = 0;
+    tjs_uint blit_tex_w_ = 0; // Last allocated texture width
+    tjs_uint blit_tex_h_ = 0; // Last allocated texture height
+    GLint blit_tex_uniform_ = -1;
+    GLint blit_flipy_uniform_ = -1;
+    GLint blit_uvscale_uniform_ = -1;
+    std::vector<uint8_t> blit_pixel_buf_;
+
+    // 视频 overlay 资源（overlay 模式电影）
+    GLuint video_overlay_program_ = 0;
+    GLint video_tex_uniform_ = -1;
+    GLint video_rect_uniform_ = -1;
+    GLuint video_overlay_texture_ = 0;
+    tjs_uint video_tex_w_ = 0;
+    tjs_uint video_tex_h_ = 0;
+    uint64_t video_overlay_serial_ = 0; // 已上传帧的提交序号
+};
+
+// ---------------------------------------------------------------------------
+// TVPInitUIExtension — originally in ui/extension/UIExtension.cpp
+// Registered custom UI widgets (PageView, etc.)
+// ---------------------------------------------------------------------------
+void TVPInitUIExtension() {
+    spdlog::debug("TVPInitUIExtension: stub (UI handled by the host shell)");
+}
+
+// ---------------------------------------------------------------------------
+// TVPCreateAndAddWindow — originally in MainScene.cpp
+// Creates a HostWindowLayer and registers it with the application.
+// ---------------------------------------------------------------------------
+iWindowLayer *TVPCreateAndAddWindow(tTJSNI_Window *w) {
+    auto *layer = new HostWindowLayer(w);
+    spdlog::info("TVPCreateAndAddWindow: created HostWindowLayer ({}x{})",
+                 layer->GetWidth(), layer->GetHeight());
+    return layer;
+}
+
+// ---------------------------------------------------------------------------
+// TVPConsoleLog — originally in MainScene.cpp
+// Logs engine console output. Redirect to spdlog.
+// ---------------------------------------------------------------------------
+void TVPConsoleLog(const ttstr &mes, bool important) {
+    // Convert TJS string to UTF-8 for spdlog
+    tTJSNarrowStringHolder narrow_mes(mes.c_str());
+    if(important) {
+        spdlog::info("[TVP Console] {}", narrow_mes.operator const char *());
+    } else {
+        spdlog::debug("[TVP Console] {}", narrow_mes.operator const char *());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TJS::TVPConsoleLog — originally in MainScene.cpp (TJS2 namespace version)
+// ---------------------------------------------------------------------------
+namespace TJS {
+    void TVPConsoleLog(const tTJSString &str) {
+        tTJSNarrowStringHolder narrow(str.c_str());
+        spdlog::debug("[TJS Console] {}", narrow.operator const char *());
+    }
+} // namespace TJS
+
+// ---------------------------------------------------------------------------
+// TVPGetOSName / TVPGetPlatformName — originally in MainScene.cpp
+// Returns OS/platform identification strings.
+// ---------------------------------------------------------------------------
+ttstr TVPGetOSName() {
+#if defined(__APPLE__)
+    return ttstr(TJS_W("macOS"));
+#elif defined(_WIN32)
+    return ttstr(TJS_W("Windows"));
+#elif defined(__linux__)
+    return ttstr(TJS_W("Linux"));
+#else
+    return ttstr(TJS_W("Unknown"));
+#endif
+}
+
+ttstr TVPGetPlatformName() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return ttstr(TJS_W("ARM64"));
+#elif defined(__x86_64__) || defined(_M_X64)
+    return ttstr(TJS_W("x86_64"));
+#else
+    return ttstr(TJS_W("Unknown"));
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// TVPGetInternalPreferencePath — originally in MainScene.cpp
+// Returns the directory path for storing preferences/config files.
+// ---------------------------------------------------------------------------
+static std::string s_internalPreferencePath;
+
+const std::string &TVPGetInternalPreferencePath() {
+    if(s_internalPreferencePath.empty()) {
+#if defined(__APPLE__)
+        const char *home = getenv("HOME");
+        if(home) {
+            s_internalPreferencePath =
+                std::string(home) + "/Library/Application Support/krkr2/";
+        } else {
+            s_internalPreferencePath = "/tmp/krkr2/";
+        }
+#elif defined(__ANDROID__)
+        // On Android, /tmp does not exist. Use the app's private data
+        // directory. Read package name from /proc/self/cmdline to build the
+        // path.
+        std::string packageName;
+        {
+            std::ifstream cmdline("/proc/self/cmdline");
+            if(cmdline.is_open()) {
+                std::getline(cmdline, packageName, '\0');
+            }
+        }
+        if(!packageName.empty()) {
+            s_internalPreferencePath =
+                "/data/data/" + packageName + "/files/krkr2/";
+        } else {
+            // Fallback: use a path that Android apps can typically write to
+            s_internalPreferencePath = "/data/local/tmp/krkr2/";
+        }
+#else
+        s_internalPreferencePath = "/tmp/krkr2/";
+#endif
+        std::filesystem::create_directories(s_internalPreferencePath);
+    }
+    return s_internalPreferencePath;
+}
+
+// ---------------------------------------------------------------------------
+// TVPGetApplicationHomeDirectory — originally in MainScene.cpp
+// Returns list of directories where the application searches for data files.
+// ---------------------------------------------------------------------------
+static std::vector<std::string> s_appHomeDirs;
+
+const std::vector<std::string> &TVPGetApplicationHomeDirectory() {
+    if(s_appHomeDirs.empty()) {
+        if(!TVPNativeProjectDir.IsEmpty()) {
+            std::string dir = TVPNativeProjectDir.AsNarrowStdString();
+            while(!dir.empty() && dir.back() == '/')
+                dir.pop_back();
+            s_appHomeDirs.push_back(dir);
+        } else {
+            s_appHomeDirs.push_back(std::filesystem::current_path().string());
+        }
+    }
+    return s_appHomeDirs;
+}
+
+// ---------------------------------------------------------------------------
+// TVPCopyFile — originally in CustomFileUtils.cpp
+// Copies a file from source to destination.
+// ---------------------------------------------------------------------------
+bool TVPCopyFile(const std::string &from, const std::string &to) {
+    std::error_code ec;
+    std::filesystem::copy_file(
+        from, to, std::filesystem::copy_options::overwrite_existing, ec);
+    if(ec) {
+        spdlog::error("TVPCopyFile failed: {} -> {} ({})", from, to,
+                      ec.message());
+        return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// TVPShowFileSelector — originally in ui/FileSelectorForm.cpp
+// Shows a file selection dialog. This is handled by the host shell.
+// Returns empty string (no selection).
+// ---------------------------------------------------------------------------
+std::string TVPShowFileSelector(const std::string &title,
+                                const std::string &init_dir,
+                                std::string default_ext, bool is_save) {
+    spdlog::warn(
+        "TVPShowFileSelector: stub — file selection handled by the host shell");
+    return "";
+}
+
+// ---------------------------------------------------------------------------
+// TVPShowPopMenu — originally in ui/InGameMenuForm.cpp
+// Shows a popup context menu. Handled by the host shell.
+// ---------------------------------------------------------------------------
+void TVPShowPopMenu(tTJSNI_MenuItem *menu) {
+    // 宿主没有弹出菜单接入点：只记录一次调用指纹（游戏用它做右键/长按菜单）。
+    // 从 warn 降为 info —— 这不是"出错"，逐次 warn 会让人误判成故障。
+    spdlog::info("TVPShowPopMenu: 宿主未实现弹出菜单，忽略本次请求（menu={}）",
+                 menu ? "present" : "null");
+}
+
+// ---------------------------------------------------------------------------
+// TVPOpenPatchLibUrl — originally in AppDelegate.cpp
+// Opens the URL for the patch library website.
+// ---------------------------------------------------------------------------
+void TVPOpenPatchLibUrl() {
+    spdlog::warn(
+        "TVPOpenPatchLibUrl: stub — URL opening handled by the host shell");
+}

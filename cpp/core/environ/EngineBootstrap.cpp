@@ -1,0 +1,156 @@
+/**
+ * @file EngineBootstrap.cpp
+ * @brief Engine bootstrapper implementation.
+ *
+ * Replaces the original AppDelegate for host-mode startup.
+ * Creates a native EGL context (Pbuffer, or ANativeWindow on Android) for
+ * headless rendering.
+ */
+
+#include "EngineBootstrap.h"
+
+#include <spdlog/spdlog.h>
+#include <thread>
+
+#include "Application.h"
+#include "ConfigManager/LocaleConfigManager.h"
+#include "krkr_egl_context.h"
+#include "krkr_gl.h"
+#include "ogl_common.h"
+#include "RenderManager.h"
+
+// Forward declaration — defined in stubs/ui_stubs.cpp
+void TVPInitUIExtension();
+
+// Forward declaration — forces linker to include the OpenGL render manager
+// translation unit (which would otherwise be dead-stripped in static library
+// builds)
+extern void TVPForceRegisterOpenGLRenderManager();
+
+extern "C" void SDL_SetMainReady();
+extern std::thread::id TVPMainThreadID;
+std::string TVPGetCurrentLanguage();
+
+// ---------------------------------------------------------------------------
+// Static member
+// ---------------------------------------------------------------------------
+
+bool TVPEngineBootstrap::s_initialized = false;
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+bool TVPEngineBootstrap::Initialize(uint32_t width, uint32_t height) {
+    if(s_initialized) {
+        spdlog::warn(
+            "TVPEngineBootstrap::Initialize called but already initialized");
+        return true;
+    }
+
+    // 1. SDL setup (required for audio / misc subsystems)
+    SDL_SetMainReady();
+    // TVPMainThreadID is captured at dylib load time (static init in
+    // Application.cpp) not the main() entry point, so it may be incorrect if
+    // the dylib is loaded on a different thread.
+    spdlog::debug("EngineBootstrap: starting initialization");
+    spdlog::default_logger()->flush();
+
+    // 2. Create native EGL context for headless rendering
+    InitializeGraphics(width, height);
+    spdlog::default_logger()->flush();
+
+    // 2.5. Force-link the OpenGL render manager so it survives static library
+    //      dead-stripping.  Must happen after EGL context is ready but before
+    //      TVPGetRenderManager() is first called.
+    TVPForceRegisterOpenGLRenderManager();
+
+    // 3. Initialize UI extensions
+    TVPInitUIExtension();
+
+    // 4. Initialize locale
+    InitializeLocale();
+
+    s_initialized = true;
+    spdlog::info("EngineBootstrap: initialization complete ({}x{})", width,
+                 height);
+    spdlog::default_logger()->flush();
+    return true;
+}
+
+void TVPEngineBootstrap::Shutdown() {
+    if(!s_initialized) {
+        return;
+    }
+
+    spdlog::info("EngineBootstrap: shutting down");
+
+    // 销毁 EGL 上下文前先排空 iTVPTexture2D 的延迟删除队列。
+    //
+    // 队列是**进程级**的、且不带上下文世代标记，而 EngineLoop::Tick 每帧都会
+    // 调 RecycleProcess 排空它，所以正常情况下队列只会在两次 tick 之间非空。
+    // 唯一的缺口在关闭阶段：EngineLoop / TVPMainScene 析构会释放纹理，此时已
+    // 不再有 tick，这些纹理就带着**旧上下文的 GL 名字**活到下一个游戏会话——
+    // 届时 glDeleteTextures 作用在新上下文上，而新上下文很可能已经复用了同一
+    // 批 id，删掉的就是**活**纹理（缺图 / 黑图）。
+    // 在此处排空，glDeleteTextures 仍在原上下文（销毁前仍 current，最后一次
+    // engine_tick 已 MakeCurrent）里执行，名字必定有效。
+    iTVPTexture2D::RecycleProcess();
+
+    krkr::GetEngineEGLContext().Destroy();
+    s_initialized = false;
+}
+
+bool TVPEngineBootstrap::Resize(uint32_t width, uint32_t height) {
+    if(!s_initialized) {
+        spdlog::error("EngineBootstrap::Resize called before Initialize");
+        return false;
+    }
+
+    auto &egl = krkr::GetEngineEGLContext();
+    if(!egl.Resize(width, height)) {
+        spdlog::error("EngineBootstrap::Resize failed for {}x{}", width,
+                      height);
+        return false;
+    }
+
+    // Update the viewport to match the new surface size
+    glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+    spdlog::info("EngineBootstrap: resized to {}x{}", width, height);
+    return true;
+}
+
+bool TVPEngineBootstrap::IsInitialized() { return s_initialized; }
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+void TVPEngineBootstrap::InitializeGraphics(uint32_t width, uint32_t height) {
+    auto &egl = krkr::GetEngineEGLContext();
+    if(!egl.Initialize(width, height)) {
+        spdlog::error("EngineBootstrap: EGL context initialization failed, "
+                      "rendering may not work correctly");
+        return;
+    }
+
+    // Set initial viewport
+    glViewport(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height));
+
+    // Clear with black
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // EGL context（重）建完成、已 make current：通知已注册的渲染器重建其 GL
+    // 对象 （shader/共享 FBO）。runtime-restart 时 context 被 Shutdown
+    // 销毁再重建，渲染器 是进程级复用单例，旧 context 的 GL id
+    // 全部失效，必须在重建后刷新，否则 二次打开渲染黑屏/乱屏（首次 open
+    // 该回调列表为空，无副作用）。
+    krkr::gl::FireRendererRecreated();
+
+    spdlog::info("EngineBootstrap: EGL context ready");
+}
+
+void TVPEngineBootstrap::InitializeLocale() {
+    LocaleConfigManager::GetInstance()->Initialize(TVPGetCurrentLanguage());
+}

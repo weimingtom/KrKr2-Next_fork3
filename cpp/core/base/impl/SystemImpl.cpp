@@ -1,0 +1,1384 @@
+//---------------------------------------------------------------------------
+/*
+        TVP2 ( T Visual Presenter 2 )  A script authoring tool
+        Copyright (C) 2000 W.Dee <dee@kikyou.info> and contributors
+
+        See details of license at "license.txt"
+*/
+//---------------------------------------------------------------------------
+// "System" class implementation
+//---------------------------------------------------------------------------
+#include "tjsCommHead.h"
+
+// #include <shellapi.h>
+// #include <shlobj.h>
+
+#include "GraphicsLoaderImpl.h"
+
+#include "SystemImpl.h"
+#include "SystemIntf.h"
+#include "SysInitIntf.h"
+#include "StorageIntf.h"
+#include "StorageImpl.h"
+#include "TickCount.h"
+#include "ComplexRect.h"
+#include "WindowImpl.h"
+#include "SystemControl.h"
+#include "DInputMgn.h"
+
+#include "Application.h"
+#include "TVPScreen.h"
+// #include "CompatibleNativeFuncs.h"
+#include "DebugIntf.h"
+// #include "VersionFormUnit.h"
+#include "vkdefine.h"
+#include "ScriptMgnIntf.h"
+#include "tjsArray.h"
+#include "Platform.h"
+
+// 和系统宏冲突了
+#ifdef _WIN32
+#undef GetClassName
+#endif
+
+//---------------------------------------------------------------------------
+static ttstr TVPAppTitle;
+static bool TVPAppTitleInit = false;
+//---------------------------------------------------------------------------
+
+bool TVPGetKeyMouseAsyncState(tjs_uint keycode, bool getcurrent);
+
+//---------------------------------------------------------------------------
+// TVPGetAsyncKeyState
+//---------------------------------------------------------------------------
+bool TVPGetAsyncKeyState(tjs_uint keycode, bool getcurrent) {
+    // get keyboard state asynchronously.
+    // return current key state if getcurrent is true.
+    // otherwise, return whether the key is pushed during previous
+    // call of TVPGetAsyncKeyState at the same keycode.
+
+    if(keycode >= VK_PAD_FIRST && keycode <= VK_PAD_LAST) {
+        // JoyPad related keys are treated in DInputMgn.cpp
+        return TVPGetJoyPadAsyncState(keycode, getcurrent);
+    }
+
+    return TVPGetKeyMouseAsyncState(keycode, getcurrent);
+#if 0
+    if(keycode == VK_LBUTTON || keycode == VK_RBUTTON)
+    {
+        // check whether the mouse button is swapped
+        if(GetSystemMetrics(SM_SWAPBUTTON))
+        {
+            // mouse button had been swapped; swap key code
+            if(keycode == VK_LBUTTON)
+                keycode = VK_RBUTTON;
+            else
+                keycode = VK_LBUTTON;
+        }
+    }
+
+    return 0!=( GetAsyncKeyState(keycode) & ( getcurrent?0x8000:0x0001) );
+#endif
+}
+
+tjs_int TVPGetOSBits() { return sizeof(void *) * 8; }
+//---------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------
+// TVPShellExecute
+//---------------------------------------------------------------------------
+bool TVPShellExecute(const ttstr &target, const ttstr &param) {
+    // open or execute target file
+//	ttstr file = TVPGetNativeName(TVPNormalizeStorageName(target));
+#if 0
+    return TVPIsExistentStorageNoSearchNoNormalize(target);
+    if (::ShellExecute(nullptr, nullptr,
+        target.c_str(),
+        param.IsEmpty() ? nullptr : param.c_str(),
+        L"",
+        SW_SHOWNORMAL)
+        <=(void *)32)
+    {
+        return false;
+    }
+    else
+#endif
+    return true;
+}
+//---------------------------------------------------------------------------
+
+static tTJSVariant RegisterData;
+
+ttstr TVPGetAppDataPath();
+
+void TVPExecuteStorage(const ttstr &name, tTJSVariant *result,
+                       bool isexpression, const tjs_char *modestr);
+
+static void InitRegisterData() {
+    static bool dataInited = false;
+    if(!dataInited) {
+        ttstr regfile = TVPGetAppDataPath() + TJS_W("RegisterData.tjs");
+        if(TVPIsExistentStorageNoSearch(regfile)) {
+            TVPExecuteStorage(regfile, &RegisterData, true, TJS_W(""));
+        }
+    }
+}
+
+//---------------------------------------------------------------------------
+// TVPReadRegValue
+//---------------------------------------------------------------------------
+static void TVPReadRegValue(tTJSVariant &result, const ttstr &key) {
+    // open specified registry key
+    if(key.IsEmpty()) {
+        result.Clear();
+        return;
+    }
+
+    // check whether the key contains root key name
+    // HKEY root = HKEY_CURRENT_USER;
+    const tjs_char *key_p = key.c_str();
+
+    InitRegisterData();
+    // search value name
+    tTJSVariant CurrentNode = RegisterData;
+    const tjs_char *start = key_p;
+    while(*start && CurrentNode.Type() != tvtObject) {
+        iTJSDispatch2 *pObj;
+
+        switch(*key_p) {
+            case '\\':
+            case '/':
+                ++key_p;
+            case '\0':
+                start = key_p;
+                if(CurrentNode.Type() != tvtObject) {
+                    CurrentNode.Clear();
+                    break;
+                }
+                pObj = CurrentNode.AsObject();
+                if(!pObj) {
+                    CurrentNode.Clear();
+                    break;
+                }
+                if(!TJS_SUCCEEDED(
+                       pObj->PropGet(TJS_MEMBERMUSTEXIST,
+                                     ttstr(start, key_p - start - 1).c_str(), 0,
+                                     &CurrentNode, pObj))) {
+                    CurrentNode.Clear();
+                    break;
+                }
+                start = key_p;
+                continue;
+            default:
+                ++key_p;
+                continue;
+        }
+    }
+    if(*start) {
+        CurrentNode.Clear();
+        return;
+    }
+    result = CurrentNode;
+#if 0
+    if(key.StartsWith(TJS_W("HKEY_CLASSES_ROOT")))
+    {
+        key_p += 17;
+        root = HKEY_CLASSES_ROOT;
+    }
+    else if(key.StartsWith(TJS_W("HKEY_CURRENT_CONFIG")))
+    {
+        key_p += 19;
+        root = HKEY_CURRENT_CONFIG;
+    }
+    else if(key.StartsWith(TJS_W("HKEY_CURRENT_USER")))
+    {
+        key_p += 17;
+        root = HKEY_CURRENT_USER;
+    }
+    else if(key.StartsWith(TJS_W("HKEY_LOCAL_MACHINE")))
+    {
+        key_p += 18;
+        root = HKEY_LOCAL_MACHINE;
+    }
+    else if(key.StartsWith(TJS_W("HKEY_USERS")))
+    {
+        key_p += 10;
+        root = HKEY_USERS;
+    }
+    else if(key.StartsWith(TJS_W("HKEY_PERFORMANCE_DATA")))
+    {
+        key_p += 21;
+        root = HKEY_PERFORMANCE_DATA;
+    }
+    else if(key.StartsWith(TJS_W("HKEY_DYN_DATA")))
+    {
+        key_p += 13;
+        root = HKEY_DYN_DATA;
+    }
+
+    if(*key_p == TJS_W('\\')) key_p ++;
+
+    // search value name
+    const tjs_char *start = key_p;
+    key_p += TJS_strlen(key_p);
+    key_p--;
+    while(start <= key_p && *key_p != TJS_W('\\')) key_p--;
+    ttstr valuename(key_p+1);
+    if(key_p < start || *key_p != TJS_W('\\')) key_p++;
+
+    ttstr keyname(start, (int)(key_p - start));
+
+    // open key
+    HKEY handle;
+    LONG res = RegOpenKeyEx(root, keyname.AsStdString().c_str(), 0, KEY_READ, &handle);
+    if(res != ERROR_SUCCESS) { result.Clear(); return; }
+
+    // try query value size and read key
+    DWORD size;
+    DWORD type;
+
+    // query size
+    res = RegQueryValueEx(handle, valuename.c_str(), 0, &type, nullptr, &size);
+
+    if(res != ERROR_SUCCESS)
+    {
+        RegCloseKey(handle);
+        result.Clear();
+        return;
+    }
+
+
+    switch(type)
+    {
+    case REG_DWORD:
+//	case REG_DWORD_LITTLE_ENDIAN: // is actually the same as REG_DWORD
+    case REG_DWORD_BIG_ENDIAN:
+    case REG_EXPAND_SZ:
+    case REG_SZ:
+        break; // these should be OK
+
+    case REG_MULTI_SZ: // sorry not yet implemented
+    case REG_BINARY:
+    case REG_LINK:
+    case REG_NONE:
+    case REG_RESOURCE_LIST:
+    default:
+        // not capable types
+        RegCloseKey(handle);
+        result.Clear();
+        return;
+    }
+
+    while(true)
+    {
+        tjs_uint8 * data = new tjs_uint8[size];
+
+        try
+        {
+            DWORD size2 = size;
+            res = RegQueryValueEx(handle, valuename.c_str(), 0, nullptr, data, &size2);
+
+            if(res == ERROR_MORE_DATA)
+            {
+                // more data required
+                delete [] data;
+                size += 1024;
+                continue;
+            }
+            else if(res != ERROR_SUCCESS)
+            {
+                RegCloseKey(handle);
+                result.Clear();
+                return;
+            }
+
+            // query succeeded
+
+
+            // store data into result
+            switch(type)
+            {
+            case REG_DWORD:
+//			case REG_DWORD_LITTLE_ENDIAN:
+                result = (tTVInteger)*(DWORD*)data;
+                break;
+
+            case REG_DWORD_BIG_ENDIAN:
+                {
+                    DWORD val = *(DWORD*)data;
+                    val = (val >> 24) + ((val >> 8) & 0x0000ff00) +
+                        ((val << 8) & 0x00ff0000) + (val << 24);
+                    result = (tTVInteger)val;
+                  }
+                break;
+
+            case REG_EXPAND_SZ:
+            case REG_SZ:
+                // data is stored in unicode
+                result = ttstr((const tjs_char*)data);
+                break;
+            }
+        }
+        catch(...)
+        {
+            RegCloseKey(handle);
+            delete [] data;
+            throw;
+        }
+        RegCloseKey(handle);
+        delete [] data;
+
+        break;
+    }
+#endif
+}
+//---------------------------------------------------------------------------
+
+#if 0
+//---------------------------------------------------------------------------
+// Static function for retrieving special folder path
+//---------------------------------------------------------------------------
+static ttstr TVPGetSpecialFolderPath(int csidl)
+{
+    WCHAR path[MAX_PATH+1];
+    if(!SHGetSpecialFolderPath(nullptr, path, csidl, false))
+        return ttstr();
+    return ttstr(path);
+}
+//---------------------------------------------------------------------------
+#endif
+
+//---------------------------------------------------------------------------
+// TVPGetPersonalPath
+//---------------------------------------------------------------------------
+ttstr TVPGetPersonalPath() {
+#if 0
+    // Retrieve personal directory;
+    // This usually refers "My Documents".
+    // If this is not exist, returns application data path, then exe path.
+    // for windows vista, this refers application data path.
+    ttstr path;
+    path = TVPGetSpecialFolderPath(CSIDL_PERSONAL);
+    if(path.IsEmpty())
+        path = TVPGetSpecialFolderPath(CSIDL_APPDATA);
+
+    if(!path.IsEmpty())
+    {
+        path = TVPNormalizeStorageName(path);
+        if(path.GetLastChar() != TJS_W('/')) path += TJS_W('/');
+        return path;
+    }
+#endif
+    return TVPGetAppPath();
+}
+//---------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------
+// TVPGetAppDataPath
+//---------------------------------------------------------------------------
+ttstr TVPGetAppDataPath() {
+#if 0
+    // Retrieve application data directory;
+    // If this is not exist, returns application exe path.
+
+    ttstr path = TVPGetSpecialFolderPath(CSIDL_APPDATA);
+
+    if(!path.IsEmpty())
+    {
+        path = TVPNormalizeStorageName(path);
+        if(path.GetLastChar() != TJS_W('/')) path += TJS_W('/');
+        return path;
+    }
+#endif
+    return TVPGetAppPath();
+}
+//---------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------
+// TVPGetSavedGamesPath
+//---------------------------------------------------------------------------
+ttstr TVPGetSavedGamesPath() {
+#if 0
+    ttstr path;
+    PWSTR ppszPath = nullptr;
+    HRESULT hr = ::SHGetKnownFolderPath(FOLDERID_SavedGames, 0, nullptr, &ppszPath);
+    if( hr == S_OK ) {
+        path = ppszPath;
+        ::CoTaskMemFree( ppszPath );
+    }
+    return path;
+#endif
+    return TVPGetAppPath();
+}
+//---------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------
+// TVPCreateAppLock
+//---------------------------------------------------------------------------
+bool TVPCreateAppLock(const ttstr &lockname) {
+#if 0
+    // lock application using mutex
+    CreateMutex(nullptr, TRUE, lockname.c_str());
+
+    if(GetLastError())
+    {
+        return false; // already running
+    }
+#endif
+
+    // No need to release the mutex object because the mutex is
+    // automatically released when the calling thread exits.
+
+    return true;
+}
+//---------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------
+enum tTVPTouchDevice {
+    tdNone = 0,
+    tdIntegratedTouch = 0x00000001,
+    tdExternalTouch = 0x00000002,
+    tdIntegratedPen = 0x00000004,
+    tdExternalPen = 0x00000008,
+    tdMultiInput = 0x00000040,
+    tdDigitizerReady = 0x00000080,
+    tdMouse = 0x00000100,
+    tdMouseWheel = 0x00000200
+};
+
+/**
+ * タッチデバイス(とマウス)の接続状態を取得する
+ **/
+static int TVPGetSupportTouchDevice() {
+    int result = 0;
+#if 0
+    if( procRegisterTouchWindow ) {
+        int value = ::GetSystemMetrics( SM_DIGITIZER );
+
+        if( value & NID_INTEGRATED_TOUCH ) result |= tdIntegratedTouch;
+        if( value & NID_EXTERNAL_TOUCH ) result |= tdExternalTouch;
+        if( value & NID_INTEGRATED_PEN ) result |= tdIntegratedPen;
+        if( value & NID_EXTERNAL_PEN ) result |= tdExternalPen;
+        if( value & NID_MULTI_INPUT ) result |= tdMultiInput;
+        if( value & NID_READY ) result |= tdDigitizerReady;
+    }
+    int value = ::GetSystemMetrics( SM_MOUSEPRESENT );
+    if( value ) {
+        result |= tdMouse;
+        value = ::GetSystemMetrics( SM_MOUSEWHEELPRESENT );
+        if( value ) result |= tdMouseWheel;
+    }
+#endif
+    result |= tdMouse;
+    result |= tdMouseWheel;
+    return result;
+}
+//---------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------
+// System.onActivate and System.onDeactivate related
+//---------------------------------------------------------------------------
+static void TVPOnApplicationActivate(bool activate_or_deactivate);
+
+//---------------------------------------------------------------------------
+class tTVPOnApplicationActivateEvent : public tTVPBaseInputEvent {
+    static tTVPUniqueTagForInputEvent Tag;
+    bool ActivateOrDeactivate; // true for activate; otherwise
+                               // deactivate
+public:
+    tTVPOnApplicationActivateEvent(bool activate_or_deactivate) :
+        tTVPBaseInputEvent(Application, Tag),
+        ActivateOrDeactivate(activate_or_deactivate) {};
+
+    void Deliver() const override {
+        TVPOnApplicationActivate(ActivateOrDeactivate);
+    }
+};
+
+tTVPUniqueTagForInputEvent tTVPOnApplicationActivateEvent::Tag;
+
+//---------------------------------------------------------------------------
+void TVPPostApplicationActivateEvent() {
+    TVPPostInputEvent(new tTVPOnApplicationActivateEvent(true),
+                      TVP_EPT_REMOVE_POST);
+}
+
+//---------------------------------------------------------------------------
+void TVPPostApplicationDeactivateEvent() {
+    TVPPostInputEvent(new tTVPOnApplicationActivateEvent(false),
+                      TVP_EPT_REMOVE_POST);
+}
+
+//---------------------------------------------------------------------------
+static void TVPOnApplicationActivate(bool activate_or_deactivate) {
+    // called by event system, to fire System.onActivate or
+    // System.onDeactivate event
+    if(!TVPSystemControlAlive)
+        return;
+
+    // check the state again (because the state may change during the
+    // event delivering). but note that this implementation might fire
+    // activate events even in the application is already activated
+    // (the same as deactivation).
+    if(activate_or_deactivate != Application->GetActivating())
+        return;
+
+    // fire the event
+    TVPFireOnApplicationActivateEvent(activate_or_deactivate);
+}
+//---------------------------------------------------------------------------
+
+#if 0
+//---------------------------------------------------------------------------
+static void TVPHeapDump()
+{
+    tjs_char buff[128];
+    HANDLE heaps[100];
+    DWORD c = ::GetProcessHeaps (100, heaps);
+    TJS_sprintf( buff, 128, TJS_W("The process has %d heaps."), c );
+    TVPAddLog( buff );
+
+    const HANDLE default_heap = ::GetProcessHeap();
+    const HANDLE crt_heap = (HANDLE)_get_heap_handle();
+    for( unsigned int i = 0; i < c; i++ ) {
+        ULONG heap_info = 0;
+        SIZE_T ret_size = 0;
+        bool isdefault = false;
+        bool isCRT = false;
+        if( ::HeapQueryInformation( heaps[i], HeapCompatibilityInformation, &heap_info, sizeof(heap_info), &ret_size) ) {
+            tjs_char* type = nullptr;
+            switch( heap_info ) {
+            case 0:
+                type = TJS_W("standard");
+                break;
+            case 1:
+                type = TJS_W("LAL");
+                break;
+            case 2:
+                type = TJS_W("LFH");
+                break;
+            default:
+                type = TJS_W("unknown");
+                break;
+            }
+            if( heaps[i] == default_heap ) {
+                isdefault = true;
+            }
+            if( heaps [i] == crt_heap ) {
+                isCRT = true;
+            }
+
+            PROCESS_HEAP_ENTRY entry;
+            memset( &entry, 0, sizeof (entry) );
+            struct Info {
+                int count;
+                tjs_int64 total;
+                tjs_int64 overhead;
+                Info() : count(0), total(0), overhead(0) {}
+            } use, uncommit, unused;
+            while( ::HeapWalk( heaps[i], &entry) ) {
+                if( entry.wFlags & PROCESS_HEAP_ENTRY_BUSY ) {
+                    use.count++;
+                    use.total += entry.cbData;
+                    use.overhead += entry.cbOverhead;
+                } else if( entry.wFlags & PROCESS_HEAP_UNCOMMITTED_RANGE ) {
+                    uncommit.count++;
+                    uncommit.total += entry.cbData;
+                    uncommit.overhead += entry.cbOverhead;
+                } else {
+                    unused.count++;
+                    unused.total += entry.cbData;
+                    unused.overhead += entry.cbOverhead;
+                }
+            }
+            ttstr mes( TJS_W("#") );
+            mes += ttstr((tjs_int)(i+1)) + TJS_W(" type: ") + type;
+            if( isdefault ) mes += TJS_W(" [default]");
+            if( isCRT ) mes += TJS_W(" [CRT]");
+            TVPAddLog( mes );
+            TJS_sprintf( buff, 128, L"  Allocated: %d, size: %lld, overhead: %lld", use.count, use.total, use.overhead );
+            TVPAddLog( buff );
+            TJS_sprintf( buff, 128, L"  Uncommitted: %d, size: %lld, overhead: %lld", uncommit.count, uncommit.total, uncommit.overhead );
+            TVPAddLog( buff );
+            TJS_sprintf( buff, 128, L"  Unused: %d, size: %lld, overhead: %lld", unused.count, unused.total, unused.overhead );
+            TVPAddLog( buff );
+        }
+    }
+}
+//---------------------------------------------------------------------------
+#endif
+bool TVPAutoSaveBookMark = false;
+
+extern void TVPDoSaveSystemVariables() {
+    try {
+        // hack for save system variable
+        iTJSDispatch2 *global = TVPGetScriptDispatch();
+        if(!global)
+            return;
+        tTJSVariant var;
+        if(global->PropGet(0, TJS_W("kag"), nullptr, &var, global) ==
+               TJS_S_OK &&
+           var.Type() == tvtObject) {
+            iTJSDispatch2 *kag = var.AsObjectNoAddRef();
+            if(kag->PropGet(0, TJS_W("saveSystemVariables"), nullptr, &var,
+                            kag) == TJS_S_OK) {
+                iTJSDispatch2 *fn = var.AsObjectNoAddRef();
+                if(fn->IsInstanceOf(0, nullptr, nullptr, TJS_W("Function"),
+                                    fn)) {
+                    tTJSVariant *args = nullptr;
+                    fn->FuncCall(0, nullptr, nullptr, nullptr, 0, &args, kag);
+                }
+            }
+            if(TVPAutoSaveBookMark &&
+               kag->PropGet(0, TJS_W("saveBookMark"), nullptr, &var, kag) ==
+                   TJS_S_OK &&
+               var.Type() == tvtObject) {
+                iTJSDispatch2 *fn = var.AsObjectNoAddRef();
+                if(fn->IsInstanceOf(0, nullptr, nullptr, TJS_W("Function"),
+                                    fn)) {
+                    tTJSVariant num((tjs_int32)0);
+                    tTJSVariant *args = &num;
+                    fn->FuncCall(0, nullptr, nullptr, nullptr, 1, &args, kag);
+                }
+            }
+        }
+    } catch(...) {
+        ;
+    }
+}
+
+//---------------------------------------------------------------------------
+// 兼容用的 mock dispatch
+//---------------------------------------------------------------------------
+// kirikiriz 系整合包会把宿主预置的对象当"什么都有、什么都返回真值"的占位符用
+// （kirikiriz.renderer、commitSavedata() 之类）。这里给最小可用的 mock：
+//   GenericMockObjectLocal    —— 属性读取返回自身、调用返回自身，可当对象用
+//   StaticGlobalMockFuncLocal —— 只作可调用的全局函数占位，返回那个 mock 对象
+// 两者移植自 AetherKiri。
+class GenericMockObjectLocal : public tTJSDispatch {
+    tjs_uint RefCount = 1;
+
+public:
+    GenericMockObjectLocal() = default;
+    ~GenericMockObjectLocal() override = default;
+
+    tjs_uint AddRef() override { return ++RefCount; }
+    tjs_uint Release() override {
+        if(--RefCount == 0) {
+            delete this;
+            return 0;
+        }
+        return RefCount;
+    }
+
+    tjs_error FuncCall(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                       tTJSVariant *result, tjs_int, tTJSVariant **,
+                       iTJSDispatch2 *) override {
+        if(result) {
+            AddRef();
+            *result = tTJSVariant(this, this);
+        }
+        return TJS_S_OK;
+    }
+
+    tjs_error PropGet(tjs_uint32, const tjs_char *membername, tjs_uint32 *,
+                      tTJSVariant *result, iTJSDispatch2 *) override {
+        if(result) {
+            // 少数成员会被脚本当数字用，给默认值；其余返回 mock 自身，
+            // 保证链式访问不会中途断掉。
+            if(membername) {
+                if(!TJS_strcmp(membername, TJS_W("count")) ||
+                   !TJS_strcmp(membername, TJS_W("length")) ||
+                   !TJS_strcmp(membername, TJS_W("left")) ||
+                   !TJS_strcmp(membername, TJS_W("top")) ||
+                   !TJS_strcmp(membername, TJS_W("x")) ||
+                   !TJS_strcmp(membername, TJS_W("y")) ||
+                   !TJS_strcmp(membername, TJS_W("opacity")) ||
+                   !TJS_strcmp(membername, TJS_W("visible"))) {
+                    *result = tTJSVariant((tjs_int)0);
+                    return TJS_S_OK;
+                }
+                if(!TJS_strcmp(membername, TJS_W("width")) ||
+                   !TJS_strcmp(membername, TJS_W("height")) ||
+                   !TJS_strcmp(membername, TJS_W("imageWidth")) ||
+                   !TJS_strcmp(membername, TJS_W("imageHeight"))) {
+                    *result = tTJSVariant((tjs_int)100);
+                    return TJS_S_OK;
+                }
+                if(!TJS_strcmp(membername, TJS_W("fps")) ||
+                   !TJS_strcmp(membername, TJS_W("frame")) ||
+                   !TJS_strcmp(membername, TJS_W("totalFrame")) ||
+                   !TJS_strcmp(membername, TJS_W("totalTime")) ||
+                   !TJS_strcmp(membername, TJS_W("rate"))) {
+                    *result = tTJSVariant((tjs_int)30);
+                    return TJS_S_OK;
+                }
+            }
+            AddRef();
+            *result = tTJSVariant(this, this);
+        }
+        return TJS_S_OK;
+    }
+
+    tjs_error PropSet(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                      const tTJSVariant *, iTJSDispatch2 *) override {
+        return TJS_S_OK;
+    }
+
+    tjs_error CreateNew(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                        iTJSDispatch2 **result, tjs_int, tTJSVariant **,
+                        iTJSDispatch2 *) override {
+        if(result) {
+            AddRef();
+            *result = this;
+        }
+        return TJS_S_OK;
+    }
+
+    tjs_error GetCount(tjs_int *result, const tjs_char *, tjs_uint32 *,
+                       iTJSDispatch2 *) override {
+        if(result)
+            *result = 0;
+        return TJS_S_OK;
+    }
+
+    tjs_error EnumMembers(tjs_uint32, tTJSVariantClosure *,
+                          iTJSDispatch2 *) override {
+        return TJS_S_OK;
+    }
+
+    tjs_error DeleteMember(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                           iTJSDispatch2 *) override {
+        return TJS_S_OK;
+    }
+
+    tjs_error Invalidate(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                         iTJSDispatch2 *) override {
+        return TJS_S_OK;
+    }
+
+    tjs_error IsValid(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                      iTJSDispatch2 *) override {
+        return TJS_S_TRUE;
+    }
+
+    tjs_error IsInstanceOf(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                           const tjs_char *, iTJSDispatch2 *) override {
+        return TJS_S_TRUE;
+    }
+
+    tjs_error Operation(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                        tTJSVariant *result, const tTJSVariant *,
+                        iTJSDispatch2 *) override {
+        if(result)
+            *result = tTJSVariant();
+        return TJS_S_OK;
+    }
+};
+
+class StaticGlobalMockFuncLocal : public tTJSDispatch {
+public:
+    StaticGlobalMockFuncLocal() = default;
+    ~StaticGlobalMockFuncLocal() override = default;
+
+    tjs_error FuncCall(tjs_uint32, const tjs_char *, tjs_uint32 *,
+                       tTJSVariant *result, tjs_int, tTJSVariant **,
+                       iTJSDispatch2 *) override {
+        if(result) {
+            // 只构造一次，之后复用；引用数随每次返回值递增，由脚本侧释放
+            static iTJSDispatch2 *dummy = new GenericMockObjectLocal();
+            dummy->AddRef();
+            *result = tTJSVariant(dummy, dummy);
+        }
+        return TJS_S_OK;
+    }
+};
+
+//---------------------------------------------------------------------------
+// 启动期兼容全局
+//---------------------------------------------------------------------------
+// 部分老游戏的启动脚本（kirikiriz 系 bootstrap，以及第三方汉化/整合补丁带来的
+// initialize.tjs）会直接读写下列名字：
+//     debugWindowEnabled = true;
+//     Plugins.linkZ("bres://.../bootstrap");
+//     if(kirikiriz) ...
+//     System.inform(msg, caption, MB_YESNO | MB_ICONINFORMATION);
+// Windows 版 KiriKiri 由宿主预置它们；本引擎缺任意一项都会以
+// `Member "xxx" does not exist` 中断启动（实测：先死在 debugWindowEnabled，
+// 补上后死在 kirikiriz）。取值与 Win32 <winuser.h> 对齐。
+// 移植自 AetherKiri 的 TVPRegisterStartupCompatGlobals()。
+//
+// 已知未移植：addFont / AddTrueTypeFont / AddAlias / loadResolutionInfo 这几个
+// 全局兼容函数（依赖字体兼容层 tFontCompatFunctionLocal）。这些游戏不引用它们，
+// 且本仓库已有 System.addFont 的插件实现。
+static void TVPRegisterStartupCompatGlobals() {
+    // GetGlobal() 内部 AddRef 过，用完必须 Release。
+    iTJSDispatch2 *global = TVPGetScriptDispatch();
+    if(!global)
+        return;
+
+    auto set_int = [global](const tjs_char *name, tjs_int value) {
+        tTJSVariant val(value);
+        global->PropSet(TJS_MEMBERENSURE | TJS_IGNOREPROP, name, nullptr, &val,
+                        global);
+    };
+    auto set_string = [global](const tjs_char *name, const tjs_char *value) {
+        tTJSVariant val(value);
+        global->PropSet(TJS_MEMBERENSURE | TJS_IGNOREPROP, name, nullptr, &val,
+                        global);
+    };
+
+    set_int(TJS_W("debugWindowEnabled"), 0);
+    set_int(TJS_W("inXP3archivePacked"), 1);
+    set_string(TJS_W("convertMode"), TJS_W(""));
+
+    // 消息框按钮 / 图标 / 返回值常量（winuser.h）
+    set_int(TJS_W("MB_OK"), 0x00000000);
+    set_int(TJS_W("MB_OKCANCEL"), 0x00000001);
+    set_int(TJS_W("MB_ABORTRETRYIGNORE"), 0x00000002);
+    set_int(TJS_W("MB_YESNOCANCEL"), 0x00000003);
+    set_int(TJS_W("MB_YESNO"), 0x00000004);
+    set_int(TJS_W("MB_RETRYCANCEL"), 0x00000005);
+    set_int(TJS_W("MB_CANCELTRYCONTINUE"), 0x00000006);
+    set_int(TJS_W("MB_ICONHAND"), 0x00000010);
+    set_int(TJS_W("MB_ICONSTOP"), 0x00000010);
+    set_int(TJS_W("MB_ICONERROR"), 0x00000010);
+    set_int(TJS_W("MB_ICONQUESTION"), 0x00000020);
+    set_int(TJS_W("MB_ICONEXCLAMATION"), 0x00000030);
+    set_int(TJS_W("MB_ICONWARNING"), 0x00000030);
+    set_int(TJS_W("MB_ICONASTERISK"), 0x00000040);
+    set_int(TJS_W("MB_ICONINFORMATION"), 0x00000040);
+    set_int(TJS_W("MB_DEFBUTTON1"), 0x00000000);
+    set_int(TJS_W("MB_DEFBUTTON2"), 0x00000100);
+    set_int(TJS_W("MB_DEFBUTTON3"), 0x00000200);
+    set_int(TJS_W("MB_DEFBUTTON4"), 0x00000300);
+    set_int(TJS_W("IDOK"), 1);
+    set_int(TJS_W("IDCANCEL"), 2);
+    set_int(TJS_W("IDABORT"), 3);
+    set_int(TJS_W("IDRETRY"), 4);
+    set_int(TJS_W("IDIGNORE"), 5);
+    set_int(TJS_W("IDYES"), 6);
+    set_int(TJS_W("IDNO"), 7);
+    set_int(TJS_W("IDTRYAGAIN"), 10);
+    set_int(TJS_W("IDCONTINUE"), 11);
+
+    // —— mock 对象与占位函数 ——
+    // kirikiriz 系整合包的启动脚本会探测这些名字，缺一个就抛
+    // `Member "xxx" does not exist` 并中断启动。
+    auto set_object = [global](const tjs_char *name, iTJSDispatch2 *obj) {
+        tTJSVariant val(obj, obj);
+        global->PropSet(TJS_MEMBERENSURE | TJS_IGNOREPROP, name, nullptr, &val,
+                        global);
+    };
+    auto set_mock_func = [&set_object](const tjs_char *name) {
+        iTJSDispatch2 *func = new StaticGlobalMockFuncLocal();
+        set_object(name, func);
+        func->Release();
+    };
+
+    // kirikiriz：脚本拿它当"是否具备 Z 扩展"的探测点。
+    //
+    // 给 **0/false**，而不是像 AetherKiri 那样给一个"什么都有"的 mock
+    // 对象：mock 会让脚本相信宿主具备 Z 扩展，于是走进 Z 分支，而 KiriNext
+    // 并没有那些 API， mock 又永远不失败（PropGet/FuncCall
+    // 无条件返回自身），脚本就可能在该分支里死 转。实测 nainiuniu5krkr
+    // 的中文补丁正是如此：KAG 框架整套加载完之后在 Z 分支
+    // 里无限递归，顶穿线程栈（SIGSEGV 闪退）。名字仍然"存在"（typeof 不再是
+    // undefined，探测不会抛），只是值诚实地说"不具备 Z 扩展"。
+    // （TJS2 没有独立的布尔类型，true/false 就是 1/0。）
+    //
+    // 这里曾用 mock 对象（与 AetherKiri 运行期取值一致）来让 G1
+    // 的启动链路多走一 段；但那只是在没有 Z API 的前提下假装有。要真正跑 Z
+    // 分支，得先有实现。
+    set_int(TJS_W("kirikiriz"), 0);
+
+    // 手柄初始键位映射：脚本按索引读写，必须是数组对象
+    {
+        iTJSDispatch2 *shortcutMap = TJSCreateArrayObject();
+        if(shortcutMap) {
+            set_object(TJS_W("ShortCutInitialPadKeyMap"), shortcutMap);
+            set_object(TJS_W("ShortCutInitialGamePadKeyMap"), shortcutMap);
+            shortcutMap->Release();
+        }
+    }
+
+    set_mock_func(TJS_W("commitSavedata"));
+    set_mock_func(TJS_W("bootStrap"));
+    set_mock_func(TJS_W("SetSystemConfigDefaults"));
+
+    // 整合包的启动脚本会 new CompoundStorageMedia，给个不报错的空实现；
+    // archiveUniqueKey 带引擎名以免撞车。安装失败不阻断启动。
+    try {
+        TVPExecuteScript(
+            TJS_W("if(typeof CompoundStorageMedia == 'undefined') {\n"
+                  "  class CompoundStorageMedia {\n"
+                  "    function addArchive() { return true; }\n"
+                  "    function addStorage() { return true; }\n"
+                  "    function addAutoToolsPath() { return true; }\n"
+                  "    function setCurrentDirectory() { return true; }\n"
+                  "    function register() { return true; }\n"
+                  "    function unregister() { return true; }\n"
+                  "    function parseArchiveIndex() { return 0; }\n"
+                  "    function getLocallyAccessibleName() { return ''; }\n"
+                  "    property archiveUniqueKey { getter() { return "
+                  "'KrKr2Next.CompoundStorageMedia'; } }\n"
+                  "  }\n"
+                  "}\n"),
+            static_cast<tTJSVariant *>(nullptr));
+    } catch(...) {
+        ;
+    }
+
+    global->Release();
+}
+
+//---------------------------------------------------------------------------
+// TVPCreateNativeClass_System
+//---------------------------------------------------------------------------
+tTJSNativeClass *TVPCreateNativeClass_System() {
+    tTJSNC_System *cls = new tTJSNC_System();
+
+    TVPRegisterStartupCompatGlobals();
+
+    // setup some platform-specific members
+    //----------------------------------------------------------------------
+
+    //-- methods
+
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ inform) {
+        // show simple message box
+        if(numparams < 1)
+            return TJS_E_BADPARAMCOUNT;
+
+        ttstr text = *param[0];
+
+        ttstr caption;
+        if(numparams >= 2 && param[1]->Type() != tvtVoid)
+            caption = *param[1];
+        else
+            caption = TJS_W("Information");
+
+        if(numparams >= 3 && param[2]->Type() != tvtVoid) {
+            std::vector<ttstr> vecButtons;
+
+            if(param[2]->Type() == tvtObject) { // vector of button
+                // 必须先置空并检查返回值：NativeInstanceSupport 在类 ID
+                // 不匹配时 返回失败且**不写**出参（tjsObject.cpp 的
+                // TJS_NIS_GETINSTANCE 分支）， 若直接使用未初始化的 ni，传非
+                // Array 对象（如 new Dictionary()） 就会解引用野指针崩溃。
+                tTJSArrayNI *ni = nullptr;
+                if(TJS_SUCCEEDED(
+                       param[2]->AsObjectNoAddRef()->NativeInstanceSupport(
+                           TJS_NIS_GETINSTANCE, TJSGetArrayClassID(),
+                           (iTJSNativeInstance **)&ni)) &&
+                   ni) {
+                    vecButtons.reserve(ni->Items.size());
+                    for(const ttstr &label : ni->Items)
+                        vecButtons.emplace_back(label);
+                }
+                // 非 Array 对象：vecButtons 留空，与传空数组行为一致
+            } else {
+                int nButtons = param[2]->AsInteger();
+                if(nButtons >= 1)
+                    vecButtons.emplace_back(TJS_W("OK"));
+                if(nButtons >= 2)
+                    vecButtons.emplace_back(TJS_W("Cancel"));
+            }
+
+            int ret = TVPShowSimpleMessageBox(text, caption, vecButtons);
+            if(result)
+                result->operator=(ret);
+            return TJS_S_OK;
+        }
+
+        TVPShowSimpleMessageBox(text, caption);
+
+        if(result)
+            result->Clear();
+
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ inform)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ getTickCount) {
+        if(result) {
+            TVPStartTickCount();
+
+            *result = (tjs_int64)TVPGetTickCount();
+        }
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ getTickCount)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ getKeyState) {
+        if(numparams < 1)
+            return TJS_E_BADPARAMCOUNT;
+
+        tjs_uint code = (tjs_int)*param[0];
+
+        bool getcurrent = true;
+        if(numparams >= 2)
+            getcurrent = 0 != (tjs_int)*param[1];
+
+        bool res = TVPGetAsyncKeyState(code, getcurrent);
+
+        if(result)
+            *result = (tjs_int)res;
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ getKeyState)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ shellExecute) {
+        if(numparams < 1)
+            return TJS_E_BADPARAMCOUNT;
+
+        ttstr target = *param[0];
+        ttstr execparam;
+
+        if(numparams >= 2)
+            execparam = *param[1];
+
+        bool res = TVPShellExecute(target, execparam);
+
+        if(result)
+            *result = (tjs_int)res;
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ shellExecute)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ system) {
+        if(numparams < 1)
+            return TJS_E_BADPARAMCOUNT;
+
+        ttstr target = *param[0];
+
+        int ret = 0; // _wsystem(target.c_str());
+
+        TVPDeliverCompactEvent(
+            TVP_COMPACT_LEVEL_MAX); // this should clear all caches
+
+        if(result)
+            *result = (tjs_int)ret;
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ system)
+    //----------------------------------------------------------------------
+    // Win32 DLL 目录 API 的移动端桩。
+    //
+    // 为什么必须有：KRKRZ 系游戏的 `initialize.tjs` 第一行就是
+    // `System.addDllDirectory(Storages.getLocalName("file://.../plugin/"))`
+    // ——它调的是 **System 原生类的成员**，不经 tjs2 的未定义全局回退（那两个
+    // `addDllDirectory`/`setDefaultDllDirectories` 只在 A2 的全局名单里），所以
+    // 缺方法时直接抛 `Member "addDllDirectory" does not exist`，游戏卡在加载。
+    // Android 没有 DLL 搜索目录概念，纯返回成功即可（与上游 AetherKiri 同款）。
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ setDefaultDllDirectories) {
+        if(result)
+            *result = static_cast<tjs_int>(1);
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ setDefaultDllDirectories)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ addDllDirectory) {
+        if(result)
+            *result = static_cast<tjs_int>(1);
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ addDllDirectory)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_PROP_DECL(llsDefaultDirs) {
+        TJS_BEGIN_NATIVE_PROP_GETTER {
+            if(result)
+                *result = static_cast<tjs_int>(0x00001000);
+            return TJS_S_OK;
+        }
+        TJS_END_NATIVE_PROP_GETTER
+
+        TJS_DENY_NATIVE_PROP_SETTER
+    }
+    TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, llsDefaultDirs)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ readRegValue) {
+        if(numparams < 1)
+            return TJS_E_BADPARAMCOUNT;
+        if(!result)
+            return TJS_S_OK;
+
+        ttstr key = *param[0];
+
+        TVPReadRegValue(*result, key);
+
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ readRegValue)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ getArgument) {
+        if(numparams < 1)
+            return TJS_E_BADPARAMCOUNT;
+        if(!result)
+            return TJS_S_OK;
+
+        ttstr name = *param[0];
+
+        bool res = TVPGetCommandLine(name.c_str(), result);
+
+        if(!res)
+            result->Clear();
+
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ getArgument)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ setArgument) {
+        if(numparams < 2)
+            return TJS_E_BADPARAMCOUNT;
+
+        ttstr name = *param[0];
+        ttstr value = *param[1];
+
+        TVPSetCommandLine(name.c_str(), value);
+
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ setArgument)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ createAppLock) {
+        if(numparams < 1)
+            return TJS_E_BADPARAMCOUNT;
+        if(!result)
+            return TJS_S_OK;
+
+        ttstr lockname = *param[0];
+
+        bool res = TVPCreateAppLock(lockname);
+
+        if(result)
+            *result = (tjs_int)res;
+
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ createAppLock)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ dumpHeap) {
+        //	TVPHeapDump();
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ dumpHeap)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ nullpo) {
+        // force make a nullptr-po
+#ifdef _MSC_VER
+        *(int *)0 = 0;
+#else
+        __builtin_trap();
+#endif
+
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ nullpo)
+    //----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/ showVersion) {
+        //	TVPShowVersionForm();
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_STATIC_METHOD_DECL_OUTER(
+        /*object to register*/ cls,
+        /*func. name*/ showVersion)
+    //---------------------------------------------------------------------------
+
+    //----------------------------------------------------------------------
+
+    //-- properties
+
+    //----------------------------------------------------------------------
+    // 与上游 AetherKiri 的 `System.arcPath` 对齐（KRKRZ 系 initialize.tjs 会读它）。
+    // 语义 = 当前 app path（同 exePath）；这里是纯新增属性。
+    TJS_BEGIN_NATIVE_PROP_DECL(arcPath){
+        TJS_BEGIN_NATIVE_PROP_GETTER{ *result = TVPGetAppPath();
+    return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, arcPath)
+//----------------------------------------------------------------------
+    TJS_BEGIN_NATIVE_PROP_DECL(exePath){
+        TJS_BEGIN_NATIVE_PROP_GETTER{ *result = TVPGetAppPath();
+    return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, exePath)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(personalPath){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = TVPGetPersonalPath();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, personalPath)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(appDataPath){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = TVPGetAppDataPath();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, appDataPath)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(dataPath){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = TVPDataPath;
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, dataPath)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(exeName){ TJS_BEGIN_NATIVE_PROP_GETTER{
+    static ttstr exename(TVPNormalizeStorageName(ExePath()));
+*result = exename;
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, exeName)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(savedGamesPath){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = TVPGetSavedGamesPath();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, savedGamesPath)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(title){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ if(!TVPAppTitleInit){ TVPAppTitleInit = true;
+TVPAppTitle = Application->GetTitle();
+}
+*result = TVPAppTitle;
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_BEGIN_NATIVE_PROP_SETTER {
+    TVPAppTitle = *param;
+    Application->SetTitle(TVPAppTitle.AsStdString());
+    return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, title)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(screenWidth){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = tTVPScreen::GetWidth();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, screenWidth)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(screenHeight){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = tTVPScreen::GetHeight();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, screenHeight)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(desktopLeft){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = tTVPScreen::GetDesktopLeft();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, desktopLeft)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(desktopTop){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = tTVPScreen::GetDesktopTop();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, desktopTop)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(desktopWidth){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = tTVPScreen::GetDesktopWidth();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, desktopWidth)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(desktopHeight){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = tTVPScreen::GetDesktopHeight();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, desktopHeight)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_PROP_DECL(touchDevice){
+    TJS_BEGIN_NATIVE_PROP_GETTER{ *result = TVPGetSupportTouchDevice();
+return TJS_S_OK;
+}
+TJS_END_NATIVE_PROP_GETTER
+
+TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, touchDevice)
+//----------------------------------------------------------------------
+
+return cls;
+}
+//---------------------------------------------------------------------------

@@ -1,0 +1,39 @@
+# build target
+#/**/build/
+/**/out/
+/**/bin/
+vcpkg_installed/
+
+# 引擎共享库由 scripts/build_engine_android.sh 投放，不入库
+#app/app/src/main/jniLibs/
+
+__pycache__/
+
+# IDE / tooling
+.idea/
+.vscode/
+.vs/
+.gradle/
+.act/
+.devtools
+local.properties
+stats_server
+
+*.lock
+java_pid*.hprof
+.DS_Store
+*.pdb
+
+# Cubism SDK (proprietary binary, download from live2d.com)
+cpp/plugins/cubism/Core/lib/
+cpp/plugins/cubism/Framework/
+bridge/flutter_engine_bridge/ios/Libs/*.a
+apps/flutter_app/devtools_options.yaml
+
+
+_testdata/savedata/krkr.console.log
+
+
+# 本地排查用的临时产物（真机日志、APK 拷贝等）。日志里含游戏路径与设备信息，
+# 不要入库。
+temp/
