@@ -19,7 +19,7 @@
 * ndk-build clean
 * ndk-build -j8 (or ndk-build NDK_DEBUG=1 -j8, see adb_logcat_and_debug_crash.txt)
 * Get libengine_api.so under android_adt/libs/arm64-v8a/libengine_api.so, copy to app/app/src/main/jniLibs/arm64-v8a/libengine_api.so  
-* Use Android ADT to load android_adt/.project
+* Use Android Studio to load ./app/   
 * Put https://github.com/weimingtom/KrKr2-Next_fork3/tree/master/_testdata/data.xp3 to "/storage/emulated/0/Download/Spring Days/Data.xp3" in the ARM64 Android device
 * Compile the apk file and install it to the Android device, Now only support ARM64 Android device
 
