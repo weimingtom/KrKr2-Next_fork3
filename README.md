@@ -6,6 +6,10 @@
 * https://github.com/clevebitr/Krkr2Next/tree/8445a127b9b9401db9a645d6c8e9acd3ee264006  
 * ndk-build based on https://github.com/weimingtom/KrKr2-Next-no-vcpkg  
 
+## TODO
+* KRKR_RENDER_PROBE macro is not enabled
+* search AetherKiri
+
 ## How to build for android  
 * cd android_adt/jni
 * Double click console.bat (modify the path %PATH% points to your Android NDK path in console.bat by yourself)  
